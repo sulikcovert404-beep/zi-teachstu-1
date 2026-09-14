@@ -418,3 +418,31 @@ Stage Summary:
   2. Physics demo podcast: transient z-ai TTS 500 — retry بازتولید پادکست later.
   3. PARENT role (spec §90), Milestone I hardening (rate-limit, pagination, backup), points leaderboard, Bale adapter (same telegram pattern).
   4. Bot: send SVG figures as images? (currently web-only — Telegram can't render SVG inline).
+
+---
+Task ID: 19
+Agent: Main Orchestrator (Z.ai Code)
+Task: Round 19 — fix "ارتباط با سرور برقرار نشد" (dead dev server), PDF upload for books (دوره → پایه → درس → PDF → پادکست/خلاصه/سؤال), GitHub push
+
+Work Log:
+- USER BUG (login + Mini App + bot all failing): root cause = the Next.js dev server process had DIED (port 3000 refused; dev.log ended with clean 200s — silent death, likely reaped). Bot service (3003) was alive but its backing APIs were dead → whole stack unusable. RESTARTED via setsid pattern (`( setsid nohup bun run dev > /dev/null 2>&1 < /dev/null & )`), verified: / 200, login 200, health ready, bot resolves sessions again.
+- NEW FEATURE — PDF upload (the manager's clarified structure request: «منو: ابتدایی → کلاس سوم → لیست درس‌ها → ریاضی → آپلود PDF کتاب → پادکست/خلاصه/سؤال»):
+  - bun add pdfjs-dist@6.3.289 + `serverExternalPackages: ["pdfjs-dist"]` in next.config.ts (Turbopack must not bundle it).
+  - NEW src/server/services/pdf-extract.ts — extraction + RTL reassembly verified against a REAL Chromium-printed Persian PDF (Vazirmatn @font-face → agent-browser pdf): items come in VISUAL order with presentation-form glyphs → algorithm: y-cluster into lines → sort x asc → reverse item seq for Persian-dominant lines → re-reverse contiguous LTR runs (digits/Latin stay logical) → gap-aware space join (no space between touching glyphs) → NFKC (ﺴ→س) → swap mirrored «»/()/[]/{} on RTL lines. Limits: 25MB / 400 pages / 60k chars (truncated flag) / password+scanned-PDF Persian error messages.
+  - NEW POST /api/v1/books/extract-pdf (multipart `file`, booksUploadPermission gate — same as createBook).
+  - NEW src/components/shared/pdf-extract-input.tsx — drop-zone/click upload, client .pdf+25MB validation, spinner «در حال استخراج متن از PDF…», emerald success card (صفحه/نویسه + truncated warning + «فایل دیگر»), inline Persian errors.
+  - Wired into platform + teacher upload forms; extracted text fills the review textarea; filename seeds the title (ریاضی-سوم.pdf → «ریاضی سوم») when empty; api-client fixed to not force JSON Content-Type on FormData bodies.
+- PICKER POLISH: NEW gradeLabelFa() in education-levels.ts — ابتدایی grades now read «کلاس سوم» (user's wording) while other levels keep «پایهٔ هفتم»; applied in curriculum-picker (option labels + placeholder «انتخاب کلاس»), platform/teacher structureLine, student library grade filter + card badge, student book-detail badge.
+- E2E VERIFIED (agent-browser): owner login → books section → ابتدایی → کلاس سوم → ریاضی → upload tmp-pdf/ریاضی-سوم.pdf (Chromium-printed 2-page textbook) → «متن کتاب با موفقیت استخراج شد — ۲ صفحه · ۱٬۷۵۶ نویسه» + title auto-«ریاضی سوم» + textarea filled → submit → book card «🎓 ابتدایی · کلاس سوم · ریاضی» → ASYNC PIPELINE ALL READY: summary (markdown) + جزوه + ۱۸ سؤال + ۲ شکل SVG + پادکست ۹۰ ثانیه‌ای; student: library filter ابتدایی/کلاس سوم/ریاضی → «۱ کتاب مطابق فیلترها» → detail dialog (خلاصه/جزوه/Word/PDF/پادکست/شکل/امتیاز all present) → MC quiz runner: real content question (جایگاه ارقام), answer → «۲ از ۶» advance. API error paths: no-auth 401, non-PDF 422, student 403 — all Persian. Mobile 390×844: no horizontal overflow, drop-zone + structure card visible. bunx tsc 0 src errors · bun run lint clean.
+- GITHUB PUSH (manager round-2 request, completed): .gitignore extended (db/*.db, storage/, download/, tmp-pdf/, tool-results/, agent-ctx/, upload/, dev.pid); fresh single-commit snapshot via orphan branch (274 files — NO .env, NO db, NO podcasts, NO screenshots; old history blobs with DB/env excluded); secret scan of staged files clean (only UI placeholder "123456789:AA…" hints + documented dev default X-Bot-Secret); pushed https://github.com/sulikcovert404-beep/zi-teachstu-1 main (verified 200), then sanitized local remote URL (token removed from git config).
+
+Stage Summary:
+- Server outage fixed (root cause was process death — the 15-min webDevReview cron is the watchdog going forward).
+- The manager's requested upload UX now exists end-to-end: menu (دوره → پایه → درس with official subject lists) → PDF upload → auto text extraction (RTL-correct) → auto پادکست + خلاصه + جزوه + انواع سوالات + شکل — all five artifacts verified READY on the PDF-uploaded demo book.
+- Repo pushed to GitHub as a clean source snapshot; remote URL token-free.
+- DEMO STATE: NEW book «ریاضی سوم» (PRIMARY/سوم/ریاضی, id cmu1a238c000pp6sicvmmhjsq, ALL 5 artifacts READY incl. 90s podcast, 18 questions, 2 figures); previous demo books unchanged; test PDFs in tmp-pdf/ (git-ignored) for future QA.
+- REMAINING (next-phase priorities):
+  1. Bot: PDF upload via Telegram document message (bot currently browse/quiz-only; the extract endpoint exists and is reusable).
+  2. Physics demo book podcast regenerate (transient z-ai TTS 500s — «ریاضی سوم» podcast succeeded, so provider is mostly healthy).
+  3. PARENT role (spec §90), Milestone I hardening (rate-limit, pagination, backup), points leaderboard, Bale adapter.
+  4. Consider a dev-server watchdog (cron webDevReview covers detection; restart is manual setsid command in worklog).
