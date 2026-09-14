@@ -1,0 +1,10 @@
+{
+  "name": "telegram-bot",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "بات تلگرام پلتفرم آموزش هوشمند ایران — mini-service (long polling, port 3003)",
+  "scripts": {
+    "dev": "bun --hot index.ts"
+  }
+}

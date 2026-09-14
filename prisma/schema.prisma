@@ -1,0 +1,624 @@
+// AI Education Platform Iran — Prisma Schema
+// Spec: Multi-Tenant, Canonical User + ExternalIdentity, Assignment→Exam→Attempt→Result,
+// Plans/Subscriptions/Usage Metering, Audit, Feature Flags, Flashcards, Study Plans, Tutor threads.
+// NOTE: SQLite connector => no enums / no Json type. Enums are validated at service layer (zod).
+//       JSON payloads are stored as String and (de)serialized via src/server/core/json.ts.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────── Identity & Tenancy ───────────────────────────────
+
+model Tenant {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  status    String   @default("ACTIVE") // ACTIVE | SUSPENDED | ARCHIVED
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  school          School?
+  users           User[]
+  classrooms      Classroom[]
+  assignments     Assignment[]
+  exams           Exam[]
+  questions       Question[]
+  subscriptions   Subscription[]
+  usageEvents     UsageEvent[]
+  auditLogs       AuditLog[]
+  flashcardDecks  FlashcardDeck[]
+  studyPlans      StudyPlan[]
+  tutorThreads    TutorThread[]
+  classResources  ClassResource[]
+  knowledgeSources KnowledgeSource[]
+  invoices        Invoice[]
+  books           Book[]
+  telegramSignups TelegramSignupRequest[]
+}
+
+model User {
+  id           String     @id @default(cuid())
+  role         String // SUPER_ADMIN | SCHOOL_ADMIN | TEACHER | STUDENT  (canonical)
+  status       String     @default("ACTIVE") // ACTIVE | SUSPENDED | PENDING
+  fullName     String
+  email        String?    @unique
+  passwordHash String?
+  phone        String?
+  grade        String? // for students, e.g. "دهم"
+  level        String? // course level code (PRE_PRIMARY | PRIMARY | MIDDLE_1 | MIDDLE_2 | TECHNICAL)
+  tenantId     String? // null only for SUPER_ADMIN
+  tenant       Tenant?   @relation(fields: [tenantId], references: [id])
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  externalIdentities ExternalIdentity[]
+  sessions           Session[]
+  webLoginTokens     WebLoginToken[]
+  taughtClassrooms   Classroom[]        @relation("ClassroomTeacher")
+  memberships        ClassMembership[]
+  createdAssignments Assignment[]       @relation("AssignmentCreator")
+  createdExams       Exam[]             @relation("ExamCreator")
+  createdQuestions   Question[]         @relation("QuestionCreator")
+  attempts           ExamAttempt[]
+  subscriptions      Subscription[]
+  usageEvents        UsageEvent[]
+  auditLogs          AuditLog[]
+  flashcardDecks     FlashcardDeck[]
+  studyPlans         StudyPlan[]
+  tutorThreads       TutorThread[]
+  createdResources   ClassResource[]    @relation("ResourceCreator")
+  createdKnowledge   KnowledgeSource[] @relation("KnowledgeCreator")
+  invoices          Invoice[]
+  uploadedBooks      Book[]             @relation("BookUploader")
+  bookQuizAttempts  BookQuizAttempt[]  @relation("BookQuizAttempts")
+  pointAwards       PointAward[]       @relation("PointAwards")
+  telegramLinkCodes TelegramLinkCode[] @relation("TelegramLinkCodes")
+}
+
+// Spec §5.1 — external identities (telegram / bale / web / android / email / phone)
+model ExternalIdentity {
+  id             String   @id @default(cuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider       String // telegram | bale | web | android | email | phone
+  externalUserId String
+  metadata       String? // JSON string
+  createdAt      DateTime @default(now())
+
+  @@unique([provider, externalUserId])
+}
+
+// Server-issued sessions. Holds Secure Role Preview context (spec §6).
+model Session {
+  id               String    @id @default(cuid())
+  userId           String
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash        String    @unique
+  // Secure Role Preview (only set for SUPER_ADMIN preview sessions)
+  previewRole      String? // effective role during preview
+  previewTenantId  String?
+  previewExpiresAt DateTime?
+  // Regular session lifetime
+  expiresAt        DateTime
+  createdAt        DateTime  @default(now())
+  revokedAt        DateTime?
+}
+
+// ─────────────────────────────── School / Class / Membership ───────────────────────────────
+
+model School {
+  id        String   @id @default(cuid())
+  tenantId  String   @unique
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  name      String
+  province  String?  // استان (e.g. تهران)
+  city      String?  // شهر
+  district  String?  // منطقهٔ آموزشی (e.g. منطقهٔ ۳)
+  status    String   @default("ACTIVE")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  classrooms Classroom[]
+}
+
+model Classroom {
+  id        String   @id @default(cuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  schoolId  String
+  school    School   @relation(fields: [schoolId], references: [id])
+  name      String
+  grade     String
+  subject   String
+  teacherId String
+  teacher   User     @relation("ClassroomTeacher", fields: [teacherId], references: [id])
+  status    String   @default("ACTIVE")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  memberships   ClassMembership[]
+  assignments   Assignment[]
+  resources     ClassResource[]
+  knowledgeSources KnowledgeSource[]
+}
+
+// Spec §16 — deletion of membership == revocation semantics
+model ClassMembership {
+  id          String    @id @default(cuid())
+  classroomId String
+  classroom   Classroom @relation(fields: [classroomId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role        String    @default("STUDENT") // STUDENT (in-class role)
+  createdAt   DateTime  @default(now())
+  revokedAt   DateTime?
+
+  @@unique([classroomId, userId])
+}
+
+// ─────────────────────────────── Assignments / Exams (spec §17, §18) ───────────────────────────────
+
+model Assignment {
+  id          String    @id @default(cuid())
+  tenantId    String
+  tenant      Tenant    @relation(fields: [tenantId], references: [id])
+  classroomId String
+  classroom   Classroom @relation(fields: [classroomId], references: [id])
+  createdBy   String
+  creator     User      @relation("AssignmentCreator", fields: [createdBy], references: [id])
+  title       String
+  description String?
+  status      String    @default("PUBLISHED") // DRAFT | PUBLISHED | CLOSED
+  publishAt   DateTime  @default(now()) // earliest availability
+  dueAt       DateTime? // deadline semantic
+  closeAt     DateTime? // hard close
+  examId      String? // nullable — assignment targets an exam
+  exam        Exam?     @relation(fields: [examId], references: [id])
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  attempts ExamAttempt[]
+}
+
+model Exam {
+  id               String   @id @default(cuid())
+  tenantId         String
+  tenant           Tenant   @relation(fields: [tenantId], references: [id])
+  createdBy        String
+  creator          User     @relation("ExamCreator", fields: [createdBy], references: [id])
+  title            String
+  description      String?
+  durationMinutes  Int      @default(20)
+  status           String   @default("PUBLISHED") // DRAFT | PUBLISHED | ARCHIVED
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  questions  Question[]
+  assignments Assignment[]
+  attempts   ExamAttempt[]
+}
+
+// Spec §44 — Question model with AI metadata
+model Question {
+  id            String   @id @default(cuid())
+  tenantId      String
+  tenant        Tenant   @relation(fields: [tenantId], references: [id])
+  examId        String? // null => question bank item
+  exam          Exam?    @relation(fields: [examId], references: [id])
+  createdBy     String
+  creator       User     @relation("QuestionCreator", fields: [createdBy], references: [id])
+  type          String // MULTIPLE_CHOICE | TRUE_FALSE | SHORT_ANSWER | FILL_IN_BLANK
+  prompt        String
+  options       String? // JSON: ["گزینه ۱","گزینه ۲",...] (for MC)
+  correctAnswer String // MC: index string; TF: "true"/"false"; SHORT: reference answer text
+  explanation   String?
+  difficulty    String   @default("MEDIUM") // EASY | MEDIUM | HARD
+  topic         String?
+  points        Int      @default(1)
+  aiGenerated   Boolean  @default(false)
+  sourceMeta    String? // JSON: {sourceId, section, page, generation model...}
+  createdAt     DateTime @default(now())
+}
+
+// Spec §18.2 — attempt with question snapshot; §71/§72 — race-safe numbering
+model ExamAttempt {
+  id               String    @id @default(cuid())
+  tenantId         String
+  examId           String
+  exam             Exam      @relation(fields: [examId], references: [id])
+  assignmentId     String
+  assignment       Assignment @relation(fields: [assignmentId], references: [id])
+  studentId        String
+  student          User      @relation(fields: [studentId], references: [id])
+  attemptNo        Int
+  questionSnapshot String // JSON: [{id,type,prompt,options,points,correctAnswer,explanation,difficulty,topic}]
+  answers          String? // JSON: {questionId: answerValue}
+  state            String    @default("IN_PROGRESS") // IN_PROGRESS | SUBMITTED | GRADED
+  startedAt        DateTime  @default(now())
+  submittedAt      DateTime?
+
+  result ExamResult?
+
+  @@unique([examId, studentId, attemptNo])
+}
+
+// Spec §18.3 — one-to-one with attempt
+model ExamResult {
+  id            String     @id @default(cuid())
+  attemptId     String     @unique
+  attempt       ExamAttempt @relation(fields: [attemptId], references: [id])
+  score         Int // earned points (server-side objective grading)
+  maxScore      Int
+  gradingMeta   String? // JSON: per-question correctness + explanations
+  createdAt     DateTime   @default(now())
+}
+
+// ─────────────────────────────── Plans / Subscriptions / Usage (spec §7, §8, §9, §41) ───────────────────────────────
+
+model Plan {
+  id            String  @id @default(cuid())
+  code          String  @unique // STUDENT_FREE | STUDENT_PRO | TEACHER_FREE | SCHOOL_FREE | SCHOOL_PRO
+  displayName   String // marketing name: رایگان / دانش‌آموز پلاس / ...
+  roleScope     String // STUDENT | TEACHER | SCHOOL
+  priceMonthly  Int     @default(0) // تومان
+  limits        String // JSON: {AI_TUTOR_DAILY: 5, SUMMARY_DAILY: 3, ...}
+  active        Boolean @default(true)
+
+  subscriptions Subscription[]
+}
+
+model Subscription {
+  id                 String   @id @default(cuid())
+  tenantId           String? // school-level subscription
+  tenant             Tenant? @relation(fields: [tenantId], references: [id])
+  userId             String? // personal subscription
+  user               User?   @relation(fields: [userId], references: [id])
+  planId             String
+  plan               Plan     @relation(fields: [planId], references: [id])
+  status             String   @default("ACTIVE") // TRIAL|ACTIVE|PAST_DUE|SUSPENDED|CANCELLED|EXPIRED
+  currentPeriodStart DateTime @default(now())
+  currentPeriodEnd   DateTime
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  invoices Invoice[]
+}
+
+// Spec §41 — Billing: purchase record for plan upgrades (mock gateway in sandbox).
+model Invoice {
+  id             String        @id @default(cuid())
+  number         String        @unique // human-readable, e.g. INV-<year><seq>
+  tenantId       String?
+  tenant         Tenant?       @relation(fields: [tenantId], references: [id])
+  userId         String
+  user           User          @relation(fields: [userId], references: [id])
+  planCode       String // purchased plan (STUDENT_PRO etc.)
+  periodMonths   Int           @default(1)
+  amount         Int // تومان charged (from plan.priceMonthly * months)
+  status         String        @default("PAID") // PENDING | PAID | FAILED | REFUNDED
+  paymentMethod  String        @default("MOCK_GATEWAY") // sandbox: deterministic mock
+  paymentRef     String? // mock gateway reference id
+  paidAt         DateTime?
+  subscriptionId String? // subscription created/extended by this invoice
+  subscription   Subscription? @relation(fields: [subscriptionId], references: [id])
+  createdAt      DateTime      @default(now())
+
+  @@index([userId, createdAt])
+}
+
+// Spec §9 — usage metering per AI request
+model UsageEvent {
+  id            String   @id @default(cuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tenantId      String?
+  tenant        Tenant? @relation(fields: [tenantId], references: [id])
+  feature       String // AI_TUTOR | SUMMARIZER | QUESTION_GENERATOR | TEACHER_ASSISTANT | FLASHCARDS | STUDY_PLANNER
+  provider      String   @default("zai")
+  model         String   @default("glm")
+  inputUnits    Int      @default(0)
+  outputUnits   Int      @default(0)
+  estimatedCost Int      @default(0) // milli-toman estimate
+  success       Boolean  @default(true)
+  createdAt     DateTime @default(now())
+
+  @@index([userId, feature, createdAt])
+  @@index([tenantId, feature, createdAt])
+}
+
+// ─────────────────────────────── Audit / Feature Flags (spec §31, §81) ───────────────────────────────
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?
+  actor      User?    @relation(fields: [actorId], references: [id])
+  tenantId   String?
+  tenant     Tenant? @relation(fields: [tenantId], references: [id])
+  action     String // login|logout|role_changed|subscription_changed|preview_started|preview_ended|exam_started|exam_submitted|assignment_created|tenant_changed|admin_action
+  targetType String?
+  targetId   String?
+  metadata   String? // JSON — sanitized, no secrets/PII
+  createdAt  DateTime @default(now())
+
+  @@index([tenantId, createdAt])
+  @@index([actorId, createdAt])
+}
+
+model FeatureFlag {
+  id          String   @id @default(cuid())
+  key         String   @unique
+  description String?
+  enabled     Boolean  @default(false)
+  scope       String   @default("global") // global | plan | tenant | role
+  scopeValue  String? // plan code / tenant id / role name
+  updatedAt   DateTime @updatedAt
+}
+
+// ─────────────────────────────── Learning: Flashcards / Study Plan / Tutor (spec §11.8, §11.9, §11.1) ───────────────────────────────
+
+model FlashcardDeck {
+  id          String   @id @default(cuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id])
+  ownerId     String
+  owner       User     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  title       String
+  topic       String?
+  sourceText  String? // excerpt used for generation
+  createdAt   DateTime @default(now())
+
+  cards Flashcard[]
+}
+
+model Flashcard {
+  id       String       @id @default(cuid())
+  deckId   String
+  deck     FlashcardDeck @relation(fields: [deckId], references: [id], onDelete: Cascade)
+  front    String
+  back     String
+  position Int          @default(0)
+}
+
+model StudyPlan {
+  id                String   @id @default(cuid())
+  tenantId          String
+  tenant            Tenant   @relation(fields: [tenantId], references: [id])
+  studentId         String
+  student           User     @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  goal              String
+  examDate          DateTime?
+  availableHoursDay Int      @default(2)
+  planJson          String? // JSON: {days:[{date, sessions:[{topic,minutes,type}]}], milestones:[]}
+  createdAt         DateTime @default(now())
+}
+
+model TutorThread {
+  id        String   @id @default(cuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  studentId String
+  student   User     @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  title     String   @default("گفتگوی جدید")
+  createdAt DateTime @default(now())
+
+  messages TutorMessage[]
+}
+
+model TutorMessage {
+  id        String      @id @default(cuid())
+  threadId  String
+  thread    TutorThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  role      String // user | assistant
+  content   String
+  createdAt DateTime    @default(now())
+}
+
+// Teacher class resources (spec §3.3 — مدیریت منابع کلاس)
+model ClassResource {
+  id          String   @id @default(cuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id])
+  classroomId String
+  classroom   Classroom @relation(fields: [classroomId], references: [id], onDelete: Cascade)
+  createdBy   String
+  creator     User     @relation("ResourceCreator", fields: [createdBy], references: [id])
+  title       String
+  description String?
+  url         String?
+  createdAt   DateTime @default(now())
+}
+
+// ─────────────────────────────── RAG / Knowledge Base (spec §12, §13, §11.13, §99) ───────────────────────────────
+// Upload/Ingest → validation → chunking → metadata → retrieval → context builder → AI Gateway → response + sources.
+// Permission applied BEFORE retrieval. Source Guardian: grounded answers with citations only.
+model KnowledgeSource {
+  id          String    @id @default(cuid())
+  tenantId    String
+  tenant      Tenant    @relation(fields: [tenantId], references: [id])
+  classroomId String? // optional class scope; null = teacher-wide for the tenant
+  classroom   Classroom? @relation(fields: [classroomId], references: [id])
+  createdBy   String
+  creator     User     @relation("KnowledgeCreator", fields: [createdBy], references: [id])
+  title       String
+  description String?
+  subject     String? // e.g. فیزیک
+  status      String    @default("READY") // PENDING | READY | FAILED
+  sourceType  String    @default("TEXT") // TEXT | DOCX | PDF (text layer only in sandbox)
+  charCount   Int       @default(0)
+  chunkCount  Int       @default(0)
+  errorReason String? // when status=FAILED
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  chunks KnowledgeChunk[]
+}
+
+model KnowledgeChunk {
+  id          String          @id @default(cuid())
+  sourceId    String
+  source      KnowledgeSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  position    Int             @default(0)
+  content     String
+  approxTokens Int            @default(0)
+  createdAt   DateTime        @default(now())
+
+  @@index([sourceId, position])
+}
+
+// ─────────────────────────────── Platform Settings (round 16 — Telegram/Gemini/books) ───────────────────────────────
+// Key/value JSON store for admin-configurable platform settings (spec §8/§10 provider selection,
+// §22 channel config, manager round-16 requests: Gemini BYO key + model, Telegram bot token,
+// Mini App URL, per-tenant book-upload permissions). Secrets are stored server-side only and
+// masked in GET responses (spec §32 — no secret ever reaches the client).
+model PlatformSetting {
+  key       String   @id
+  value     String   // JSON string
+  updatedAt DateTime @updatedAt
+}
+
+// ─────────────────────────────── Books / Smart Library (round 16) ───────────────────────────────
+// Uploading a book triggers an async generation pipeline: markdown summary, structured
+// study notes (جزوه), sample-question models (MC / true-false / fill-in-blank / short-answer),
+// educational SVG figures, and a spoken podcast (WAV on disk).
+// tenantId null => platform-wide book (SUPER_ADMIN upload); classroomId set => teacher-scoped.
+// Manager round-18 rule: platform books are visible to students immediately; tenant/classroom
+// uploads wait for SUPER_ADMIN approval (approvalStatus) before students can see them.
+model Book {
+  id          String   @id @default(cuid())
+  tenantId    String? // null = platform-wide (added by SUPER_ADMIN)
+  tenant      Tenant? @relation(fields: [tenantId], references: [id])
+  classroomId String? // optional classroom scope (teacher uploads)
+  addedById   String
+  addedBy     User     @relation("BookUploader", fields: [addedById], references: [id])
+  title       String
+  author      String?
+  subject     String?
+  level       String? // course level code (PRE_PRIMARY | PRIMARY | MIDDLE_1 | MIDDLE_2 | TECHNICAL)
+  gradeLevel  String?
+  description String?
+  coverEmoji  String   @default("📘")
+  contentText String
+  charCount   Int      @default(0)
+  status      String   @default("PENDING") // PENDING | GENERATING | READY | PARTIAL | FAILED
+  summary     String? // markdown summary
+  summaryStatus String @default("PENDING") // PENDING | READY | FAILED
+  studyNotes  String? // markdown جزوه (definitions, formulas, exam tips)
+  studyNotesStatus String @default("PENDING")
+  figures     String? // JSON: [{id,title,svg,caption}] — sanitized educational SVG diagrams
+  figuresStatus String @default("PENDING")
+  figuresCount Int     @default(0)
+  podcastPath String?  // relative storage path (storage/books/<id>.wav)
+  podcastStatus String @default("PENDING")
+  podcastDurationSec Int?
+  quiz        String? // JSON: {mc:[…],tf:[…],fb:[…],short:[…]}
+  quizStatus  String   @default("PENDING")
+  quizCount   Int      @default(0)
+  approvalStatus String @default("NOT_REQUIRED") // NOT_REQUIRED (platform) | PENDING | APPROVED | REJECTED
+  approvalNote  String? // e.g. rejection reason shown to the uploader
+  errorReason String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  attempts BookQuizAttempt[]
+
+  @@index([tenantId, status])
+  @@index([approvalStatus, createdAt])
+  @@index([addedById])
+}
+
+// Lightweight practice attempts on a book's sample questions — shared by web AND Telegram
+// (same grading endpoint; server-side objective grading, points awarded on best-improvement).
+model BookQuizAttempt {
+  id            String   @id @default(cuid())
+  bookId        String
+  book          Book     @relation(fields: [bookId], references: [id], onDelete: Cascade)
+  userId        String
+  user          User     @relation("BookQuizAttempts", fields: [userId], references: [id])
+  quizModel     String   // MC | TF | MIXED
+  answers       String   // JSON: {itemId: answerValue}
+  score         Int      @default(0)
+  maxScore      Int      @default(0)
+  pointsAwarded Int      @default(0)
+  createdAt     DateTime @default(now())
+
+  @@index([bookId, userId, createdAt])
+}
+
+// ─────────────────────────────── Points ledger (round 16 — gamification) ───────────────────────────────
+// Students earn points by answering sample questions (web + Telegram) and completing exams.
+// One append-only ledger; totals are derived, never stored on the user row.
+model PointAward {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation("PointAwards", fields: [userId], references: [id], onDelete: Cascade)
+  points    Int
+  reason    String // BOOK_QUIZ | EXAM_COMPLETED
+  refType   String?
+  refId     String?
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
+
+// ─────────────────────────────── Telegram signup requests (round 17) ───────────────────────────────
+// In-bot / Mini-App registration: user shares their phone number and picks a school;
+// the request waits for approval by SUPER_ADMIN, SCHOOL_ADMIN or a TEACHER of that school.
+// On approval a canonical User + ExternalIdentity(telegram) is created (passwordless —
+// web access via one-time WebLoginToken links issued by the bot / Mini App).
+model TelegramSignupRequest {
+  id               String   @id @default(cuid())
+  telegramId       String   @unique // one live request per telegram account
+  telegramUsername String?
+  phone            String // normalized 09xxxxxxxxx
+  fullName         String
+  role             String // STUDENT | TEACHER
+  level            String? // course level code (PRE_PRIMARY | PRIMARY | MIDDLE_1 | MIDDLE_2 | TECHNICAL)
+  grade            String? // e.g. دهم
+  tenantId         String // selected school tenant
+  tenant           Tenant   @relation(fields: [tenantId], references: [id])
+  status           String   @default("PENDING") // PENDING | APPROVED | REJECTED
+  rejectReason     String?
+  reviewedById     String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([tenantId, status])
+  @@index([status, createdAt])
+}
+
+// ─────────────────────────────── One-time web login tokens (round 17) ───────────────────────────────
+// «باز کردن در مرورگر» — the bot / Mini App mints a single-use, short-TTL token; the
+// web app exchanges it (POST /api/v1/auth/web-login) for a normal session. Only the
+// SHA-256 hash is stored; tokens are consumed atomically on first use.
+model WebLoginToken {
+  id         String    @id @default(cuid())
+  tokenHash  String    @unique
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([userId, createdAt])
+}
+
+// ─────────────────────────────── Telegram account linking (round 16) ───────────────────────────────
+// Short-lived 6-digit codes: web-authenticated user requests a code, sends it to the bot,
+// the bot service redeems it via the internal API → ExternalIdentity(telegram) is created.
+model TelegramLinkCode {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation("TelegramLinkCodes", fields: [userId], references: [id])
+  code      String    @unique
+  expiresAt DateTime
+  consumedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId, createdAt])
+}
