@@ -147,6 +147,40 @@ export async function extractPdfFromUrl(ctx: AuthContext, rawUrl: string): Promi
   return { ...out, storageKey, sourceUrl: url };
 }
 
+// ── Round 21 — «تست لینک دانلود»: فقط بررسی دانلودشدنی بودن (بدون استخراج متن) ──
+// مدیر کل می‌خواهد مطمئن شود لینک دانلود کتاب واقعاً کار می‌کند؛ اگر نشد خطای دقیق فارسی بدهد.
+
+export interface PdfLinkTestResult {
+  ok: true;
+  fileName: string;
+  sizeBytes: number;
+  sourceUrl: string;
+}
+
+export async function testPdfUrl(ctx: AuthContext, rawUrl: string): Promise<PdfLinkTestResult> {
+  const perm = await booksUploadPermission(ctx);
+  if (!perm.can) {
+    throw Errors.forbidden(
+      "قابلیت افزودن کتاب برای شما فعال نیست. مدیر کل پلتفرم باید آن را در «تنظیمات و اتصال‌ها» فعال کند."
+    );
+  }
+
+  const url = (rawUrl ?? "").trim();
+  if (!/^https?:\/\//i.test(url) || url.length > 800) {
+    throw Errors.validation("لینک دانلود باید با http:// یا https:// شروع شود.");
+  }
+
+  // همان دانلود امن (SSRF-گارد، سقف حجم، امضای PDF) — اگر هر مرحله شکست بخورد
+  // همان خطای فارسیِ دقیق به کاربر می‌رسد (این «تست» است).
+  const { bytes, fileName } = await safeFetchPdf(url);
+  return {
+    ok: true,
+    fileName,
+    sizeBytes: bytes.byteLength,
+    sourceUrl: url,
+  };
+}
+
 /** محافظ SSRF — فقط میزبان‌های عمومی؛ IPهای لوکال/خصوصی و لوکال‌هاست مسدود می‌شوند */
 function isPrivateIp(ip: string): boolean {
   const v4 =

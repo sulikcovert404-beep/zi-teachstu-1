@@ -475,3 +475,37 @@ Stage Summary:
   2. PARENT role (spec §90), Milestone I hardening (rate-limit, pagination, backup), points leaderboard, Bale adapter (same telegram pattern).
   3. Optional: allow the bot to also accept a URL (paste link → same wizard) — extract-url endpoint already exists and is reusable.
   4. Physics demo book podcast was PARTIAL at last check (transient TTS) — retry via بازتولید if still failing.
+
+---
+Task ID: 21
+Agent: Main Orchestrator (Z.ai Code)
+Task: Round 21 — CRITICAL bot bug «بعد از خروج/ورود مجدد هیچ فرمانی حتی /start کار نمی‌کند» + «باکس تست لینک دانلود کتاب» در پنل مدیریت کل (تست دانلود، خطای واضح اگر نشد)
+
+Work Log:
+- MANAGER REPORT: «داخل تلگرام از اپ خروج میزنم دوباره ورود میزنم خود بات دستوراتی مثل start از کار میافته هیچی کار نمیکنه و دوباره از من کد تلگرام نیمخواد» + «برای مدیرییت کل پلتفرم هم آپلود کتاب قرار بده و یک باکس لینک دانلود کتاب هم قرار بده تست کنه اگر نمیشه دانلود کرد خطا بده».
+- ROOT-CAUSE DIAGNOSIS (bot dead, NOT a logout problem): Telegram getWebhookInfo showed pending_update_count=7 — the manager's messages (/start ×4, کتاب‌خانه ×2, …) were sitting unconsumed. A direct getUpdates call (no 409) proved the long-polling loop was frozen. DB check: both telegram identities (5381124996 + 5927736949) linked to owner and resolvable — server side was healthy; the Mini App logout/re-login had re-linked the identity correctly (login-screen autoLinkTelegram). The freeze mechanism: pollLoop awaited handleUpdate(u) SEQUENTIALLY, and several body-reads were UN-TIMED (mainAppFetch clears its timer once headers arrive → res.json()/res.arrayBuffer() unprotected; the Telegram file download fetch(url) had NO timeout at all). When the dev server died mid-response (round 19 outage) or a Telegram file download stalled, the body-read promise stayed pending forever → the whole polling loop froze silently (no log line) → bot stopped answering EVERYTHING. The manager's logout/login attempts were unrelated — the bot process needed revival.
+- BOT HARDENING (mini-services/telegram-bot/index.ts):
+  1. NEW withTimeout(promise, ms, label) helper; readJson now races res.json() (20s); NEW readArrayBuffer races res.arrayBuffer() (90–110s) — replaced the 4 unprotected sites (summary.docx / notes.docx / podcast / original.pdf).
+  2. Telegram PDF file download (onBookDocument): AbortController 120s covering fetch+arrayBuffer.
+  3. pollLoop now dispatches via enqueueUpdate() — PER-CHAT SERIAL QUEUES (same user's messages keep order, different chats parallel) and the loop NEVER awaits a handler, so one slow/hung update can no longer kill the bot.
+  4. Heartbeat watchdog: g.__tgBotBeat updated every iteration; 60s interval checks >5min staleness → aborts in-flight long-polls (unsticks the loop) + restarts pollLoop if it fully died (g.__tgBotLoop flag).
+  5. cmdStart now purges chatSessions cache before resolving → /start ALWAYS reflects the true link state (after Mini App «خروج و قطع اتصال», /start correctly shows the unlinked welcome + asks for the 6-digit link code instead of a stale cached menu). Any authed() call still self-heals via 401→re-resolve.
+  6. Bot service fully RESTARTED (kill 1266/1260 tree → setsid bun run dev). Verified: startup log clean, getWebhookInfo pending_update_count=0 (all 7 stuck manager messages consumed and answered — manager received the overdue responses in Telegram).
+- «باکس تست لینک دانلود کتاب» (platform admin + teacher forms):
+  - NEW POST /api/v1/books/test-url {url} → {ok, fileName, sizeBytes, sourceUrl} — reuses safeFetchPdf (SSRF-guard: private/local hosts + DNS-resolved IP checks, ≤3 validated redirects, content-type check, 25MB streamed cap, 30s timeout, %PDF signature). Permission = same booksUploadPermission rules. Persian error on every failure mode.
+  - NEW service fn testPdfUrl in pdf-extract.ts.
+  - pdf-extract-input.tsx URL mode upgraded: [تست لینک (FlaskConical outline)] + [دریافت و استخراج (gradient)] buttons; testBusy spinner «در حال دانلود و تست لینک…»; emerald success card «لینک سالم است — فایل با موفقیت دانلود و اعتبارسنجی شد ✅» + fileName · faSize(کیلوبایت/مگابایت) · «PDF معتبر» + CTA to extract; rose error card «دانلود از این لینک ممکن نشد!» + exact server Persian error + «تلاش مجدد»; typing a new URL clears stale test results; responsive flex-col→sm:flex-row (mobile 390px verified, no horizontal overflow).
+- API E2E (curl, owner token): test-url GOOD link → {ok:true, fileName:"sample.pdf", sizeBytes:18810} ✓; 404 link → «دریافت فایل از لینک ناموفق بود (کد ۴۰۴)» 422 ✓; HTML page → «آدرس داده‌شده به فایل PDF اشاره ندارد…» ✓; 192.168.x → SSRF «آدرس این لینک به شبکهٔ داخلی اشاره می‌کند…» ✓; no-auth → 401 ✓.
+- BROWSER E2E (agent-browser): owner login → کتابخانه هوشمند → فرم → tab «لینک دانلود» → paste BAD link → «تست لینک» → rose card with 404 error ✓ → paste GOOD link → «تست لینک» → emerald card (sample.pdf · ۱۸ کیلوبایت · PDF معتبر) ✓ → «دریافت و استخراج» → «متن کتاب با موفقیت استخراج شد» ✓ → title «کتاب تست لینک دانلود (راند ۲۱)» + ابتدایی → کلاس سوم → ریاضی → «ثبت و ساخت محتوای هوشمند» → book card with «نسخهٔ اصلی PDF ضمیمه است (دانلودی دانش‌آموزان)» ✓; student login → library shows the new book + «PDF اصلی» chip ✓; student original.pdf download: HTTP 200 · 18,810 bytes · application/pdf · %PDF- magic ✓. Book pipeline reached ALL-READY after podcast retry (summary/notes/quiz 16q/figures/podcast 45s). Mobile 390×844: scrollWidth=390 (no overflow) ✓. Zero console/page errors.
+- CLEANUP: regenerated previously-FAILED podcasts — «کتاب نمونهٔ لینکی (تست)» + «فارسی پایهٔ هفتم» now READY (6 books total; only «جزوهٔ فیزیک» podcast still FAILED: z-ai TTS provider keeps returning 500 «网络错误» for that specific long text — external/transient, بازتولید button ready).
+- bunx tsc: src 0 errors · bot tsc 0 errors · bun run lint clean. Cron: deleted 2 disabled duplicates, created fresh 15-min webDevReview job (385332).
+
+Stage Summary:
+- ROUND 21 COMPLETE — both manager asks delivered:
+  1. باگ بات حل شد: root cause was the frozen polling loop (un-timed body reads + sequential handler await), NOT the logout flow. Bot is hardened (per-chat queues, timeouts everywhere, heartbeat watchdog, /start fresh-resolve) and REVIVED — the manager's 7 stuck messages were consumed and answered. After a future Mini App logout, /start will correctly ask for the link code again.
+  2. پنل مدیریت کل: book upload (file) + «باکس لینک دانلود کتاب» with a real TEST button — the server actually downloads the link (SSRF-guarded); on failure an exact Persian error is shown (۴۰۴ / non-PDF / too big / private network / timeout); on success the file name+size+PDF validity are displayed and extraction+PDF attach proceeds.
+- DEMO STATE: NEW book «کتاب تست لینک دانلود (راند ۲۱)» (PRIMARY/سوم/ریاضی, id cmu1hkpix0043p6t18h7kymov, ALL 5 artifacts READY, original PDF attached, student-download verified). Bot @teachstu2026_bot live with pending=0.
+- REMAINING (next-phase priorities):
+  1. Manager: re-test the live bot in Telegram (خروج → /start asks for code → کد اتصال؛ کتاب‌خانه؛ PDF upload wizard). Podcast of «جزوهٔ فیزیک» still hits z-ai TTS 500 — retry بازتولید later.
+  2. PARENT role (spec §90), Milestone I hardening (rate-limit, pagination, backup), points leaderboard, Bale adapter.
+  3. Optional: bot accepts a pasted download-URL as book source (reuse /api/v1/books/extract-url + test-url in wizard), book EDIT (attach/replace PDF link for existing books).

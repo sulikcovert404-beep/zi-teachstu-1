@@ -282,6 +282,8 @@ const g = globalThis as {
   __tgBotOffset?: number;
   __tgBotAborts?: Set<AbortController>;
   __tgBotServer?: unknown;
+  __tgBotBeat?: number; // ضربان حلقهٔ نظرسنجی (watchdog راند ۲۱)
+  __tgBotLoop?: boolean; // آیا حلقهٔ نظرسنجی در حال اجراست؟
 };
 
 const myGen = (g.__tgBotGen = (g.__tgBotGen ?? 0) + 1);
@@ -542,10 +544,48 @@ async function mainAppFetch(path: string, init?: RequestInit, timeoutMs = 25_000
   }
 }
 
-async function readJson<T>(res: Response | null | undefined): Promise<T | null> {
+/**
+ * راند ۲۱ — مقاوم‌سازی: خواندن بدنهٔ پاسخ (json/arrayBuffer) نیز باید مهلت زمانی داشته باشد.
+ * ریشهٔ باگ «بات از کار افتاد»: با مرگ ناگهانی سرور وسط پاسخ، سوکت نیمه‌باز می‌ماند و
+ * res.json()/res.arrayBuffer() برای همیشه معلق می‌شود؛ چون handleUpdate ترتیبی بود،
+ * کل حلقهٔ نظرسنجی فریز می‌شد و هیچ فرمانی (حتی /start) دیگر پاسخ نمی‌گرفت.
+ */
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T | null> {
+  return new Promise((resolve) => {
+    const t = setTimeout(() => {
+      log(`⏱ مهلت «${label}» (${faNum(Math.round(ms / 1000))} ثانیه) به پایان رسید — ادامه می‌دهیم.`);
+      resolve(null);
+    }, ms);
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      () => {
+        clearTimeout(t);
+        resolve(null);
+      }
+    );
+  });
+}
+
+async function readJson<T>(res: Response | null | undefined, timeoutMs = 20_000): Promise<T | null> {
   if (!res) return null;
   try {
-    return (await res.json()) as T;
+    return (await withTimeout(res.json(), timeoutMs, "پاسخ JSON")) as T | null;
+  } catch {
+    return null;
+  }
+}
+
+/** خواندن بدنهٔ فایل (docx/podcast/PDF) با مهلت زمانی — دیگر گیر ابدی وجود ندارد */
+async function readArrayBuffer(
+  res: Response | null | undefined,
+  timeoutMs = 90_000
+): Promise<ArrayBuffer | null> {
+  if (!res) return null;
+  try {
+    return await withTimeout(res.arrayBuffer(), timeoutMs, "دریافت فایل از سرور");
   } catch {
     return null;
   }
@@ -971,7 +1011,7 @@ async function sendDocx(chatId: number, from: TgUser, bookId: string): Promise<v
   const res = await authed(chatId, from, `/api/v1/books/${encodeURIComponent(bookId)}/summary.docx`, undefined, 90_000);
   if (res === "unlinked") return void (await promptLink(chatId));
   if (!res || !res.ok) return void (await sendMessage(chatId, `⚠️ ${esc(apiErrorText(await readJson(res)))}`));
-  const buf = await res.arrayBuffer().catch(() => null);
+  const buf = await readArrayBuffer(res, 90_000);
   if (!buf || buf.byteLength === 0) return void (await sendMessage(chatId, NET_ERR));
   if (buf.byteLength > 49 * 1024 * 1024) {
     return void (await sendMessage(chatId, "⚠️ حجم فایل برای ارسال در تلگرام زیاد است — لطفاً از نسخهٔ وب دانلود کنید."));
@@ -1032,7 +1072,7 @@ async function sendNotesDocx(chatId: number, from: TgUser, bookId: string): Prom
   const res = await authed(chatId, from, `/api/v1/books/${encodeURIComponent(bookId)}/notes.docx`, undefined, 90_000);
   if (res === "unlinked") return void (await promptLink(chatId));
   if (!res || !res.ok) return void (await sendMessage(chatId, `⚠️ ${esc(apiErrorText(await readJson(res)))}`));
-  const buf = await res.arrayBuffer().catch(() => null);
+  const buf = await readArrayBuffer(res, 90_000);
   if (!buf || buf.byteLength === 0) return void (await sendMessage(chatId, NET_ERR));
   if (buf.byteLength > 49 * 1024 * 1024) {
     return void (await sendMessage(chatId, "⚠️ حجم فایل برای ارسال در تلگرام زیاد است — لطفاً از نسخهٔ وب دانلود کنید."));
@@ -1066,7 +1106,7 @@ async function sendPodcast(chatId: number, from: TgUser, bookId: string): Promis
   const res = await authed(chatId, from, `/api/v1/books/${encodeURIComponent(bookId)}/podcast`, undefined, 120_000);
   if (res === "unlinked") return void (await promptLink(chatId));
   if (!res || !res.ok) return void (await sendMessage(chatId, `⚠️ ${esc(apiErrorText(await readJson(res)))}`));
-  const buf = await res.arrayBuffer().catch(() => null);
+  const buf = await readArrayBuffer(res, 110_000);
   if (!buf || buf.byteLength === 0) return void (await sendMessage(chatId, NET_ERR));
   if (buf.byteLength > 49 * 1024 * 1024) {
     return void (await sendMessage(chatId, "⚠️ فایل صوتی برای تلگرام بزرگ است — لطفاً از نسخهٔ وب دانلود کنید."));
@@ -1099,7 +1139,7 @@ async function sendOriginalPdf(chatId: number, from: TgUser, bookId: string): Pr
   const res = await authed(chatId, from, `/api/v1/books/${encodeURIComponent(bookId)}/original.pdf`, undefined, 90_000);
   if (res === "unlinked") return void (await promptLink(chatId));
   if (!res || !res.ok) return void (await sendMessage(chatId, `⚠️ ${esc(apiErrorText(await readJson(res)))}`));
-  const buf = await res.arrayBuffer().catch(() => null);
+  const buf = await readArrayBuffer(res, 90_000);
   if (!buf || buf.byteLength === 0) return void (await sendMessage(chatId, NET_ERR));
   if (buf.byteLength > 49 * 1024 * 1024) {
     return void (await sendMessage(chatId, "⚠️ حجم فایل برای ارسال در تلگرام زیاد است — لطفاً از نسخهٔ وب دانلود کنید."));
@@ -1662,15 +1702,23 @@ async function onBookDocument(chatId: number, from: TgUser, doc: TgDocument): Pr
   await sendMessage(chatId, `📥 <b>دریافت شد:</b> <code>${esc(fileName)}</code>\n\n⏳ در حال دانلود و استخراج متن… چند لحظه صبر کنید.`);
   await chatAction(chatId, "upload_document");
 
-  // ۱) دانلود فایل از سرور تلگرام
+  // ۱) دانلود فایل از سرور تلگرام (راند ۲۱: با مهلت زمانی — قبلاً بدون timeout بود و
+  // گیر کردن آن کل حلقهٔ نظرسنجی را می‌کشت)
   let bytes: Uint8Array | null = null;
   try {
     const f = await tg<{ file_path?: string }>("getFile", { file_id: doc.file_id });
     if (!f.file_path) throw new Error("no file_path");
     const url = `${TG_API_BASE}/file/bot${state.botToken}/${f.file_path}`;
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`http ${res.status}`);
-    bytes = new Uint8Array(await res.arrayBuffer());
+    const dlCtrl = new AbortController();
+    const dlTimer = setTimeout(() => dlCtrl.abort(), 120_000);
+    try {
+      const dres = await fetch(url, { signal: dlCtrl.signal });
+      if (!dres.ok) throw new Error(`http ${dres.status}`);
+      const ab = await withTimeout(dres.arrayBuffer(), 110_000, "دانلود فایل تلگرام");
+      if (ab) bytes = new Uint8Array(ab);
+    } finally {
+      clearTimeout(dlTimer);
+    }
   } catch (e) {
     log(`⚠️ getFile/download: ${errStr(e)}`);
     return void (await sendMessage(chatId, `${NET_ERR}\n\nدانلود فایل از تلگرام ناموفق بود — دوباره بفرستید.`));
@@ -2052,6 +2100,9 @@ async function onUploadCallback(cb: TgCallbackQuery, chatId: number, messageId: 
 
 async function cmdStart(chatId: number, from: TgUser): Promise<void> {
   await chatAction(chatId, "typing");
+  // راند ۲۱ — /start همیشه وضعیت واقعی اتصال را از سرور می‌گیرد (کش را بی‌اعتبار می‌کنیم)
+  // تا پس از «خروج و قطع اتصال» در مینی‌اپ، بات درست رفتار کند و کد اتصال بخواهد.
+  chatSessions.delete(chatId);
   const s = await getSession(chatId, from);
   if (s) await sendWelcomeLinked(chatId, from, s);
   else await sendWelcomeUnlinked(chatId, from);
@@ -2204,6 +2255,43 @@ async function handleUpdate(u: TgUpdate): Promise<void> {
   if (u.callback_query) return void (await onCallback(u.callback_query));
 }
 
+/**
+ * راند ۲۱ — صف سریال هر چت: پیام‌های یک کاربر به ترتیب پردازش می‌شوند اما حلقهٔ
+ * نظرسنجی هرگز روی پردازش «منتظر» نمی‌ماند. اگر پردازشی (هرچند بعید) گیر کند،
+ * فقط همان چت دیر پاسخ می‌گیرد — بات برای بقیه و برای /start زنده می‌ماند.
+ */
+interface ChatQueue {
+  chain: Promise<void>;
+  pending: number;
+}
+const chatQueues = new Map<number, ChatQueue>();
+
+function enqueueUpdate(u: TgUpdate): void {
+  const chatId = u.message?.chat.id ?? u.callback_query?.message?.chat.id ?? null;
+  if (chatId == null) {
+    // بدون chat قابل‌تشخیص — بی‌خیالِ صف، فقط لاگ
+    void handleUpdate(u).catch((e: unknown) => log(`⚠️ خطا در پردازش پیام: ${errStr(e)}`));
+    return;
+  }
+  let q = chatQueues.get(chatId);
+  if (!q) {
+    q = { chain: Promise.resolve(), pending: 0 };
+    chatQueues.set(chatId, q);
+  }
+  const queue = q;
+  queue.pending += 1;
+  const next = queue.chain
+    .then(() => handleUpdate(u))
+    .catch((e: unknown) => {
+      log(`⚠️ خطا در پردازش پیام: ${errStr(e)}`);
+    })
+    .then(() => {
+      queue.pending -= 1;
+      if (queue.pending <= 0 && chatQueues.get(chatId) === queue) chatQueues.delete(chatId);
+    });
+  queue.chain = next;
+}
+
 // ─────────────────────────────── پیکربندی + نظرسنجی ───────────────────────────────
 
 async function refreshConfig(): Promise<void> {
@@ -2292,7 +2380,10 @@ async function activateBot(): Promise<void> {
 }
 
 async function pollLoop(): Promise<void> {
+  g.__tgBotLoop = true;
+  g.__tgBotBeat = Date.now();
   while (alive()) {
+    g.__tgBotBeat = Date.now();
     if (!state.botToken) {
       await sleep(2500);
       continue;
@@ -2307,11 +2398,7 @@ async function pollLoop(): Promise<void> {
         if (!alive()) break;
         offset = u.update_id + 1;
         g.__tgBotOffset = offset;
-        try {
-          await handleUpdate(u);
-        } catch (e) {
-          log(`⚠️ خطا در پردازش پیام: ${errStr(e)}`);
-        }
+        enqueueUpdate(u); // غیرمسدودکننده — حلقه هرگز روی پردازش گیر نمی‌کند (رفع راند ۲۱)
       }
     } catch (e) {
       if (e instanceof BotApiError) {
@@ -2338,6 +2425,7 @@ async function pollLoop(): Promise<void> {
       }
     }
   }
+  g.__tgBotLoop = false;
   log("حلقهٔ نظرسنجی این نسخه متوقف شد (بارگذاری مجدد)");
 }
 
@@ -2381,6 +2469,23 @@ const configTimer = setInterval(() => {
   }
   void refreshConfig().catch(() => undefined);
 }, 30_000);
+
+// ─────────────────────── نگهبان ضربان حلقهٔ نظرسنجی (راند ۲۱) ───────────────────────
+// اگر حلقه به هر دلیلی بیش از ۵ دقیقه ضربان نزند: long-pollهای احتمالاً گیرکرده را
+// abort می‌کنیم (آزادسازی حلقه) و در صورت مرگ کامل حلقه، دوباره راه‌اندازی می‌کنیم.
+const beatTimer = setInterval(() => {
+  if (!alive()) {
+    clearInterval(beatTimer);
+    return;
+  }
+  const last = g.__tgBotBeat ?? 0;
+  if (last && Date.now() - last > 5 * 60_000) {
+    log("⚠️ نظرسنجی بیش از ۵ دقیقه بی‌ضربان مانده — بازیابی حلقه…");
+    for (const ctrl of [...(g.__tgBotAborts ?? [])]) ctrl.abort(); // آزادسازی گیر احتمالی
+    g.__tgBotBeat = Date.now(); // جلوگیری از راه‌اندازی مکرر
+    if (!g.__tgBotLoop) void pollLoop(); // اگر حلقه کاملاً مرده، دوباره
+  }
+}, 60_000);
 
 // ─────────────────────────────── سرویس سلامت (HTTP) ───────────────────────────────
 

@@ -1,0 +1,11 @@
+import { PrismaClient } from '@prisma/client';
+const db = new PrismaClient();
+const ids = await db.externalIdentity.findMany({ select: { id: true, userId: true, provider: true, externalUserId: true, createdAt: true } });
+console.log('ExternalIdentities:', JSON.stringify(ids, null, 1));
+const users = await db.user.findMany({ where: { OR: [{ email: 'owner@platform.ir' }, { email: 'admin@school.ir' }, { email: 'teacher@school.ir' }, { email: 'student@school.ir' }] }, select: { id: true, email: true, role: true } });
+console.log('Users:', JSON.stringify(users, null, 1));
+const sessions = await db.session.findMany({ select: { id: true, userId: true, expiresAt: true, createdAt: true }, orderBy: { createdAt: 'desc' }, take: 10 });
+console.log('Recent sessions:', JSON.stringify(sessions, null, 1));
+const tgusers = await db.user.findMany({ select: { id: true, email: true, role: true }, where: { email: { contains: 'telegram' } } });
+console.log('TG-signup users:', JSON.stringify(tgusers, null, 1));
+await db.$disconnect();

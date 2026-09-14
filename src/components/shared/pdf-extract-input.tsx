@@ -4,10 +4,23 @@ import { useRef, useState, type ReactNode } from "react";
 import { api, ApiClientError } from "@/lib/app/api-client";
 import { faNum } from "@/components/shared/blocks";
 import { cn } from "@/lib/utils";
-import { FileText, Link2, Loader2, PackageOpen, RefreshCw, TriangleAlert, UploadCloud, X } from "lucide-react";
+import {
+  BadgeCheck,
+  FileText,
+  FlaskConical,
+  Link2,
+  Loader2,
+  PackageOpen,
+  RefreshCw,
+  TriangleAlert,
+  UploadCloud,
+  X,
+} from "lucide-react";
 
 // ── Round 19 — PDF upload with server-side text extraction ──
 // ── Round 20 — two sources share one widget: 📎 file upload OR 🔗 download link ──
+// ── Round 21 — «تست لینک دانلود» دکمهٔ مستقل: سرور لینک را واقعاً دانلود می‌کند و ──
+// اگر دانلود نشد خطای دقیق فارسی نشان می‌دهد؛ بعد مدیر به «دریافت و استخراج» می‌رود.
 // Used by the platform + teacher book upload forms: the admin picks
 // دوره → پایه → درس and provides the textbook either as a PDF file or as a direct
 // download link; the server extracts the text (RTL-aware) and keeps the original PDF
@@ -24,6 +37,23 @@ export interface PdfExtractResult {
   fileName: string;
   storageKey: string;
   sourceUrl?: string;
+}
+
+export interface PdfLinkTestResult {
+  ok: true;
+  fileName: string;
+  sizeBytes: number;
+  sourceUrl: string;
+}
+
+/** حجم فایل به فارسی (کیلوبایت/مگابایت) */
+function faSize(bytes: number): string {
+  if (bytes >= 1024 * 1024) {
+    const mb = bytes / (1024 * 1024);
+    // Intl.NumberFormat fa-IR خودش ممیز فارسی می‌گذارد
+    return `${new Intl.NumberFormat("fa-IR", { maximumFractionDigits: 1 }).format(mb)} مگابایت`;
+  }
+  return `${faNum(Math.max(1, Math.round(bytes / 1024)))} کیلوبایت`;
 }
 
 type Mode = "file" | "url";
@@ -46,6 +76,10 @@ export function PdfExtractInput({
   const [dragOver, setDragOver] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<PdfExtractResult | null>(null);
+  // ── تست لینک دانلود (راند ۲۱) ──
+  const [testBusy, setTestBusy] = useState(false);
+  const [testOk, setTestOk] = useState<PdfLinkTestResult | null>(null);
+  const [testErr, setTestErr] = useState<string | null>(null);
 
   function switchMode(next: Mode) {
     if (disabled || busy || next === mode) return;
@@ -90,6 +124,8 @@ export function PdfExtractInput({
     if (disabled || busy || !u) return;
     setError(null);
     setDone(null);
+    setTestOk(null);
+    setTestErr(null);
     if (!/^https?:\/\//i.test(u)) {
       setError("لینک باید با http:// یا https:// شروع شود.");
       return;
@@ -109,10 +145,42 @@ export function PdfExtractInput({
     }
   }
 
+  /** راند ۲۱ — تست لینک دانلود: سرور فایل را واقعاً دانلود می‌کند؛ خطای دقیق اگر نشد */
+  async function handleTestUrl() {
+    const u = url.trim();
+    if (disabled || testBusy || busy || !u) return;
+    setTestOk(null);
+    setTestErr(null);
+    setError(null);
+    setDone(null);
+    if (!/^https?:\/\//i.test(u)) {
+      setTestErr("لینک باید با http:// یا https:// شروع شود.");
+      return;
+    }
+    setTestBusy(true);
+    try {
+      const res = await api<PdfLinkTestResult>("/api/v1/books/test-url", {
+        method: "POST",
+        body: JSON.stringify({ url: u }),
+      });
+      setTestOk(res);
+    } catch (e) {
+      setTestErr(
+        e instanceof ApiClientError
+          ? e.message
+          : "دانلود از این لینک ممکن نشد — آدرس را بررسی کنید و دوباره تست کنید."
+      );
+    } finally {
+      setTestBusy(false);
+    }
+  }
+
   function reset() {
     setError(null);
     setDone(null);
     setUrl("");
+    setTestOk(null);
+    setTestErr(null);
     onCleared?.();
   }
 
@@ -203,39 +271,111 @@ export function PdfExtractInput({
             <Link2 className="h-3.5 w-3.5 text-teal-600 dark:text-teal-400" aria-hidden />
             لینک مستقیم دانلود PDF کتاب
           </label>
-          <div className="flex gap-2">
+          <div className="flex flex-col sm:flex-row gap-2">
             <input
               id={`${idPrefix}-url`}
               type="url"
               dir="ltr"
               inputMode="url"
-              className="h-11 flex-1 rounded-lg border border-border/70 bg-background px-3 text-xs placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-teal-500/40 focus:border-teal-500/60 transition-all"
+              className="h-11 flex-1 min-w-0 rounded-lg border border-border/70 bg-background px-3 text-xs placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-teal-500/40 focus:border-teal-500/60 transition-all"
               placeholder="https://example.com/riazi-3.pdf"
               value={url}
-              onChange={(e) => setUrl(e.target.value)}
+              onChange={(e) => {
+                setUrl(e.target.value);
+                if (testOk || testErr) {
+                  // لینک عوض شد — نتیجهٔ تست قبلی دیگر معتبر نیست
+                  setTestOk(null);
+                  setTestErr(null);
+                }
+              }}
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
                   e.preventDefault();
                   void handleUrl();
                 }
               }}
-              disabled={disabled}
+              disabled={disabled || testBusy}
               maxLength={800}
               autoComplete="off"
               spellCheck={false}
             />
-            <button
-              type="button"
-              onClick={() => void handleUrl()}
-              disabled={disabled || !url.trim()}
-              className="h-11 px-4 rounded-lg bg-gradient-to-l from-emerald-600 to-teal-600 text-white text-xs font-medium inline-flex items-center gap-1.5 hover:brightness-110 active:scale-[0.98] transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              <PackageOpen className="h-4 w-4" aria-hidden />
-              دریافت و استخراج
-            </button>
+            <div className="flex gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => void handleTestUrl()}
+                disabled={disabled || testBusy || !url.trim()}
+                className="h-11 px-3.5 rounded-lg border border-teal-600/50 text-teal-700 dark:text-teal-400 text-xs font-medium inline-flex items-center gap-1.5 hover:bg-teal-500/10 active:scale-[0.98] transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {testBusy ? (
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                ) : (
+                  <FlaskConical className="h-4 w-4" aria-hidden />
+                )}
+                تست لینک
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleUrl()}
+                disabled={disabled || !url.trim()}
+                className="h-11 px-4 rounded-lg bg-gradient-to-l from-emerald-600 to-teal-600 text-white text-xs font-medium inline-flex items-center gap-1.5 hover:brightness-110 active:scale-[0.98] transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <PackageOpen className="h-4 w-4" aria-hidden />
+                دریافت و استخراج
+              </button>
+            </div>
           </div>
+
+          {/* نتیجهٔ تست لینک دانلود (راند ۲۱) */}
+          {testBusy && (
+            <div
+              className="rounded-lg border border-teal-500/40 bg-teal-500/5 px-3 py-2 flex items-center gap-2"
+              role="status"
+            >
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-teal-600 dark:text-teal-400 shrink-0" aria-hidden />
+              <p className="text-[11px] text-teal-700 dark:text-teal-400">در حال دانلود و تست لینک…</p>
+            </div>
+          )}
+          {testOk && !testBusy && (
+            <div
+              className="rounded-lg border border-emerald-500/40 bg-emerald-500/5 px-3 py-2.5 flex items-start gap-2"
+              role="status"
+            >
+              <BadgeCheck className="h-4 w-4 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" aria-hidden />
+              <div className="min-w-0 flex-1">
+                <p className="text-[11px] font-medium text-emerald-700 dark:text-emerald-400 leading-5">
+                  لینک سالم است — فایل با موفقیت دانلود و اعتبارسنجی شد ✅
+                </p>
+                <p className="text-[10px] text-muted-foreground truncate leading-4" dir="auto">
+                  {testOk.fileName} · {faSize(testOk.sizeBytes)} · PDF معتبر
+                </p>
+                <p className="text-[10px] text-muted-foreground leading-4">
+                  حالا «دریافت و استخراج» را بزنید تا متن کتاب استخراج و PDF اصلی ضمیمه شود.
+                </p>
+              </div>
+            </div>
+          )}
+          {testErr && !testBusy && (
+            <div
+              className="rounded-lg border border-rose-500/40 bg-rose-500/5 px-3 py-2.5 flex items-start gap-2"
+              role="alert"
+            >
+              <TriangleAlert className="h-4 w-4 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" aria-hidden />
+              <div className="min-w-0 flex-1">
+                <p className="text-[11px] font-medium text-rose-700 dark:text-rose-400 leading-5">دانلود از این لینک ممکن نشد!</p>
+                <p className="text-[10px] text-rose-600/90 dark:text-rose-400/90 leading-5">{testErr}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setTestErr(null)}
+                className="text-[10px] underline underline-offset-2 shrink-0 text-rose-700 dark:text-rose-400"
+              >
+                تلاش مجدد
+              </button>
+            </div>
+          )}
+
           <p className="text-[10px] text-muted-foreground leading-4">
-            سرور خودش فایل را از لینک می‌گیرد (تا ۲۵ مگابایت) — نسخهٔ اصلی PDF برای دانلود دانش‌آموزان نگه داشته می‌شود.
+            سرور خودش فایل را از لینک می‌گیرد (تا ۲۵ مگابایت) — نسخهٔ اصلی PDF برای دانلود دانش‌آموزان نگه داشته می‌شود. با «تست لینک» ابتدا مطمئن شوید لینک دانلود می‌شود.
           </p>
         </div>
       )}
