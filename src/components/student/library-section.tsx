@@ -13,7 +13,7 @@ import { EmptyState, ErrorState, LoadingGrid, PageTitle, faNum } from "@/compone
 import { cn } from "@/lib/utils";
 import { EDUCATION_LEVELS, gradesForLevel, gradeLabelFa, levelLabel } from "@/lib/education-levels";
 import { subjectsForLevelGrade } from "@/lib/curriculum";
-import { BookOpen, Library, Search, Shapes, Sparkles, Trophy } from "lucide-react";
+import { BookOpen, FileDown, Library, Search, Shapes, Sparkles, Trophy } from "lucide-react";
 import { BookDetailView, type ArtifactStatus, type BookRow } from "./book-detail";
 
 // ── Student Smart Library (Round 16 + 18) ──
@@ -402,6 +402,17 @@ export function LibrarySection({ onGo }: { onGo?: (section: string) => void }) {
                           </span>
                         </TooltipTrigger>
                         <TooltipContent className="text-[10px]">{faNum(b.figuresCount)} شکل آموزشی</TooltipContent>
+                      </Tooltip>
+                    )}
+                    {b.hasOriginalPdf && (
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 text-[10px] cursor-default text-emerald-700 dark:text-emerald-400">
+                            <FileDown className="h-3 w-3" aria-hidden />
+                            PDF اصلی
+                          </span>
+                        </TooltipTrigger>
+                        <TooltipContent className="text-[10px]">نسخهٔ اصلی کتاب (PDF) قابل دانلود است</TooltipContent>
                       </Tooltip>
                     )}
                   </div>

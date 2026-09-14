@@ -115,6 +115,7 @@ interface TeacherBookRow {
   podcastStatus: string;
   podcastDurationSec: number | null;
   quizCount: number;
+  hasOriginalPdf?: boolean;
   approvalStatus: "NOT_REQUIRED" | "PENDING" | "APPROVED" | "REJECTED";
   approvalNote: string | null;
   createdAt: string;
@@ -498,6 +499,8 @@ function BookUploadForm({ classes, onCreated }: { classes: TeacherClass[] | null
   const [coverEmoji, setCoverEmoji] = useState("📘");
   const [classroomId, setClassroomId] = useState("ALL");
   const [text, setText] = useState("");
+  const [pdfKey, setPdfKey] = useState<string | null>(null); // Round 20 — کلید PDF اصلی برای ضمیمه شدن به کتاب
+  const [pdfName, setPdfName] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [blocked, setBlocked] = useState<string | null>(null);
 
@@ -517,6 +520,8 @@ function BookUploadForm({ classes, onCreated }: { classes: TeacherClass[] | null
   // seeds the title when it is still empty.
   function onPdfExtracted(r: PdfExtractResult) {
     setText(r.text);
+    setPdfKey(r.storageKey ?? null);
+    setPdfName(r.fileName ?? null);
     if (!title.trim()) {
       const suggested = r.fileName
         .replace(/\.pdf$/i, "")
@@ -544,6 +549,8 @@ function BookUploadForm({ classes, onCreated }: { classes: TeacherClass[] | null
           description: description.trim() || undefined,
           coverEmoji,
           classroomId: classroomId !== "ALL" ? classroomId : undefined,
+          pdfStorageKey: pdfKey || undefined,
+          pdfFileName: pdfName || undefined,
         }),
       });
       toast({
@@ -551,7 +558,7 @@ function BookUploadForm({ classes, onCreated }: { classes: TeacherClass[] | null
         description: "تولید خلاصه، جزوه، شکل‌ها، نمونه‌سؤال‌ها و پادکست آغاز شد. پس از تأیید مدیر کل برای دانش‌آموزان نمایش داده می‌شود.",
       });
       setTitle(""); setCurr({}); setAuthor(""); setDescription("");
-      setCoverEmoji("📘"); setClassroomId("ALL"); setText("");
+      setCoverEmoji("📘"); setClassroomId("ALL"); setText(""); setPdfKey(null); setPdfName(null);
       onCreated();
     } catch (e) {
       if (e instanceof ApiClientError) {
@@ -671,10 +678,10 @@ function BookUploadForm({ classes, onCreated }: { classes: TeacherClass[] | null
 
         <div className="space-y-1.5">
           <Label htmlFor="tb-text" className="text-xs">متن کامل کتاب / جزوه *</Label>
-          <PdfExtractInput idPrefix="tb-pdf" onExtracted={onPdfExtracted} onCleared={() => setText("")} disabled={busy} />
+          <PdfExtractInput idPrefix="tb-pdf" onExtracted={onPdfExtracted} onCleared={() => { setText(""); setPdfKey(null); setPdfName(null); }} disabled={busy} />
           <p className="text-[10px] text-muted-foreground leading-4 flex items-center gap-1">
             <FileText className="h-3 w-3" aria-hidden />
-            فایل PDF جزوه/کتاب را بارگذاری کنید یا متن را دستی در کادر پایین بچسبانید.
+            فایل PDF جزوه/کتاب را بارگذاری کنید، لینک مستقیم دانلود آن را بدهید، یا متن را دستی در کادر پایین بچسبانید.
           </p>
           <Textarea
             id="tb-text"

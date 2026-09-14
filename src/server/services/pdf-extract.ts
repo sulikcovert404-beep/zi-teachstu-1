@@ -4,6 +4,13 @@
 // پادکست) can run on it. Extraction uses pdfjs-dist (legacy Node build) kept external
 // via next.config serverExternalPackages.
 //
+// Round 20 — two ingestion sources now share this core:
+//   • direct file upload (POST /api/v1/books/extract-pdf — multipart)
+//   • download link  (POST /api/v1/books/extract-url — server fetches the PDF)
+// In BOTH cases the original PDF bytes are kept in storage/books/tmp/<key>.pdf and a
+// storageKey is returned; createBook moves the file next to the book row so students
+// can download the real book (GET /api/v1/books/:id/original.pdf).
+//
 // RTL reassembly (verified against a Chromium-printed Persian PDF with the Vazirmatn
 // font): pdf.js returns text items in VISUAL order (x ascending) with presentation-form
 // glyphs. For Persian-dominant lines we reverse the item sequence to logical order,
@@ -11,8 +18,12 @@
 // with a gap-aware space heuristic, then NFKC-normalize presentation forms to base
 // letters (ﺴ → س). Persian digits (۰-۹) are unaffected by NFKC.
 
+import crypto from "crypto";
+import dns from "dns/promises";
+import fs from "fs/promises";
+import path from "path";
 import type { AuthContext } from "@/server/auth/session";
-import { Errors } from "@/server/core/errors";
+import { ApiError, Errors } from "@/server/core/errors";
 import { booksUploadPermission } from "@/server/services/books";
 
 export const PDF_MAX_BYTES = 25 * 1024 * 1024; // 25MB
@@ -30,6 +41,53 @@ export interface ExtractedPdf {
   chars: number;
   truncated: boolean;
   fileName: string;
+  storageKey: string; // tmp key of the kept original PDF (attach on createBook)
+  sourceUrl?: string;
+}
+
+const TMP_DIR = path.join(process.cwd(), "storage", "books", "tmp");
+const STORAGE_KEY_RE = /^[a-zA-Z0-9_-]{6,}\.pdf$/;
+
+/** نگهداری فایل اصلی برای دانلود بعدی دانش‌آموزان (storage/books/tmp/<key>.pdf) */
+async function keepOriginalPdf(bytes: Uint8Array): Promise<string> {
+  await fs.mkdir(TMP_DIR, { recursive: true });
+  const key = `${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}.pdf`;
+  await fs.writeFile(path.join(TMP_DIR, key), bytes);
+  return key;
+}
+
+/** جابه‌جایی فایل موقتی به کنار ردیف کتاب — توسط createBook فراخوانده می‌شود */
+export async function attachOriginalPdf(
+  bookId: string,
+  storageKey: string | null | undefined,
+  fileName: string | null | undefined
+): Promise<{ path: string; name: string } | null> {
+  if (!storageKey || !STORAGE_KEY_RE.test(storageKey)) return null;
+  const src = path.join(TMP_DIR, storageKey);
+  const dest = path.join(process.cwd(), "storage", "books", `${bookId}-original.pdf`);
+  try {
+    await fs.rename(src, dest); // tmp و storage در یک فایل‌سیستم‌اند
+    return { path: dest, name: (fileName ?? "book.pdf").slice(0, 120) };
+  } catch {
+    return null; // فایل موقتی نبود (مثلاً فرم بدون PDF ثبت شد) — بی‌خطر
+  }
+}
+
+/** پاک‌سازی بهترین تلاشِ فایل‌های موقتیِ رهاشده (>۲۴ ساعت) */
+async function sweepTmp(): Promise<void> {
+  try {
+    const entries = await fs.readdir(TMP_DIR).catch(() => null);
+    if (!entries) return;
+    const cutoff = Date.now() - 24 * 3600_000;
+    for (const e of entries) {
+      if (!e.endsWith(".pdf")) continue;
+      const p = path.join(TMP_DIR, e);
+      const st = await fs.stat(p).catch(() => null);
+      if (st && st.mtimeMs < cutoff) await fs.rm(p, { force: true }).catch(() => undefined);
+    }
+  } catch {
+    /* بهترین تلاش */
+  }
 }
 
 interface Piece {
@@ -61,7 +119,165 @@ export async function extractPdfText(ctx: AuthContext, file: File): Promise<Extr
     throw Errors.validation("این فایل PDF معتبر نیست (امضای فایل یافت نشد).");
   }
 
+  void sweepTmp(); // housekeeping — غیر مسدودکننده
+  const storageKey = await keepOriginalPdf(data);
+  const out = await extractFromBytes(data, fileName);
+  return { ...out, storageKey };
+}
+
+// ── Round 20 — استخراج از لینک دانلود (سرور خودش فایل را می‌گیرد) ──
+
+export async function extractPdfFromUrl(ctx: AuthContext, rawUrl: string): Promise<ExtractedPdf> {
+  const perm = await booksUploadPermission(ctx);
+  if (!perm.can) {
+    throw Errors.forbidden(
+      "قابلیت افزودن کتاب برای شما فعال نیست. مدیر کل پلتفرم باید آن را در «تنظیمات و اتصال‌ها» فعال کند."
+    );
+  }
+
+  const url = (rawUrl ?? "").trim();
+  if (!/^https?:\/\//i.test(url) || url.length > 800) {
+    throw Errors.validation("لینک دانلود باید با http:// یا https:// شروع شود.");
+  }
+
+  const { bytes, fileName } = await safeFetchPdf(url);
+  void sweepTmp();
+  const storageKey = await keepOriginalPdf(bytes);
+  const out = await extractFromBytes(bytes, fileName);
+  return { ...out, storageKey, sourceUrl: url };
+}
+
+/** محافظ SSRF — فقط میزبان‌های عمومی؛ IPهای لوکال/خصوصی و لوکال‌هاست مسدود می‌شوند */
+function isPrivateIp(ip: string): boolean {
+  const v4 =
+    /^(127\.|10\.|0\.|192\.168\.|169\.254\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)/.test(ip) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(ip);
+  const v6 =
+    ip === "::1" ||
+    ip === "::" ||
+    /^(f[cd]|fe[89ab])/i.test(ip); // fc00::/7 (private) + fe80::/10 (link-local)
+  return v4 || v6;
+}
+
+async function assertPublicHttpUrl(raw: string): Promise<URL> {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    throw Errors.validation("لینک دانلود معتبر نیست.");
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") {
+    throw Errors.validation("فقط لینک‌های http و https پشتیبانی می‌شوند.");
+  }
+  const host = u.hostname.toLowerCase().replace(/\.$/, "");
+  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal")) {
+    throw Errors.validation("لینک‌های داخلی/لوکال برای امنیت قابل قبول نیستند — لینک عمومی فایل کتاب را بفرستید.");
+  }
+  // حل DNS و بررسی همهٔ IPها (جلوگیری از دور زدن با نام دامنه)
+  try {
+    const addrs = await dns.lookup(host, { all: true });
+    for (const a of addrs) {
+      const ip = a.address.toLowerCase();
+      const mapped = ip.startsWith("::ffff:") ? ip.slice(7) : ip;
+      if (isPrivateIp(ip) || isPrivateIp(mapped)) {
+        throw Errors.validation("آدرس این لینک به شبکهٔ داخلی اشاره می‌کند — برای امنیت قابل قبول نیست.");
+      }
+    }
+  } catch (e) {
+    if (e instanceof ApiError) throw e; // خطای خودمان را دست‌نخورده رد کن
+    throw Errors.validation("میزبان این لینک قابل شناسایی نبود — آدرس را بررسی کنید.");
+  }
+  return u;
+}
+
+/** دانلود امن PDF با محافظ SSRF (IPهای خصوصی/لوکال مسدود، پیگیری حداکثر ۳ ریدایرکت) */
+async function safeFetchPdf(
+  startUrl: string,
+  hopsLeft = 3
+): Promise<{ bytes: Uint8Array; fileName: string }> {
+  await assertPublicHttpUrl(startUrl);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 30_000);
+  try {
+    const res = await fetch(startUrl, {
+      redirect: "manual", // هر پرش را خودمان اعتبارسنجی می‌کنیم
+      signal: ctrl.signal,
+      headers: { "user-agent": "AEP-BookImporter/1.0", accept: "application/pdf,*/*" },
+    });
+    // ریدایرکت؟ → مقصد را مثل لینک اصلی اعتبارسنجی و دنبال کن
+    if (res.status >= 300 && res.status < 400) {
+      const loc = res.headers.get("location");
+      if (!loc) throw Errors.validation("سرور لینک مقصد را اعلام نکرد (ریدایرکت بدون Location).");
+      if (hopsLeft <= 0) throw Errors.validation("زنجیرهٔ ریدایرکت‌های این لینک بیش از حد طولانی است.");
+      const next = new URL(loc, startUrl).toString();
+      return await safeFetchPdf(next, hopsLeft - 1);
+    }
+    if (!res.ok) {
+      throw Errors.validation(`دریافت فایل از لینک ناموفق بود (کد ${res.status.toLocaleString("fa-IR")}).`);
+    }
+
+    const contentType = (res.headers.get("content-type") ?? "").toLowerCase();
+    if (contentType && !contentType.includes("pdf")) {
+      throw Errors.validation("آدرس داده‌شده به فایل PDF اشاره ندارد — لینک مستقیم فایل کتاب را بفرستید.");
+    }
+
+    const declared = Number(res.headers.get("content-length") ?? "0");
+    if (declared && declared > PDF_MAX_BYTES) {
+      throw Errors.validation("حجم فایل PDF بیش از ۲۵ مگابایت است — لطفاً فایل سبک‌تری معرفی کنید.");
+    }
+
+    // خواندن جریانی با سقف حجم
+    const reader = res.body?.getReader();
+    if (!reader) throw Errors.validation("پاسخ دریافتی فایل قابل خواندنی ندارد.");
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        total += value.byteLength;
+        if (total > PDF_MAX_BYTES) {
+          ctrl.abort();
+          throw Errors.validation("حجم فایل PDF بیش از ۲۵ مگابایت است.");
+        }
+        chunks.push(value);
+      }
+    }
+    const bytes = new Uint8Array(total);
+    let off = 0;
+    for (const c of chunks) {
+      bytes.set(c, off);
+      off += c.byteLength;
+    }
+    if (bytes.length === 0) throw Errors.validation("فایل دریافتی خالی است.");
+    if (bytes[0] !== 0x25 || bytes[1] !== 0x50 || bytes[2] !== 0x44 || bytes[3] !== 0x46) {
+      throw Errors.validation("فایل دریافتی PDF معتبر نیست — لینک باید مستقیماً به فایل کتاب ختم شود.");
+    }
+
+    // نام فایل: content-disposition → مسیر لینک → پیش‌فرض
+    let fileName = "";
+    const cd = res.headers.get("content-disposition") ?? "";
+    const cdMatch = /filename\*?=(?:UTF-8''|")?([^";]+)/i.exec(cd);
+    if (cdMatch) fileName = decodeURIComponent(cdMatch[1].trim()).slice(0, 120);
+    if (!fileName) {
+      const base = decodeURIComponent(new URL(startUrl).pathname.split("/").pop() ?? "").slice(0, 120);
+      if (/\.pdf$/i.test(base)) fileName = base;
+    }
+    if (!fileName) fileName = "book.pdf";
+    return { bytes, fileName };
+  } catch (e) {
+    if (e instanceof ApiError) throw e; // خطاهای فارسی خودمان را دست‌نخورده رد کن
+    if (e instanceof Error && e.name === "AbortError") {
+      throw Errors.validation("دریافت فایل از لینک بیش از ۳۰ ثانیه طول کشید — بعداً دوباره تلاش کنید.");
+    }
+    throw Errors.validation("دریافت فایل از این لینک ممکن نشد — آدرس را بررسی کنید.");
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
   // Dynamic import keeps the heavy parser out of the module graph until first use.
+async function extractFromBytes(data: Uint8Array, fileName: string): Promise<Omit<ExtractedPdf, "storageKey">> {
   const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
   const task = pdfjs.getDocument({
     data,

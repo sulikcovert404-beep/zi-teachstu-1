@@ -29,7 +29,7 @@ import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 import {
   BookOpen, CheckCircle2, FileText, Globe, Headphones, Info, Layers, Library, Loader2,
-  NotebookPen, PenLine, Plus, RefreshCw, Settings, Shapes, Trash2, Upload, XCircle,
+  NotebookPen, PackageOpen, PenLine, Plus, RefreshCw, Settings, Shapes, Trash2, Upload, XCircle,
 } from "lucide-react";
 
 // ── Platform Smart Library manage (Round 16 + Round 18) ──
@@ -97,6 +97,7 @@ interface PlatformBookRow {
   podcastStatus: string;
   podcastDurationSec: number | null;
   quizCount: number;
+  hasOriginalPdf: boolean; // Round 20 — نسخهٔ اصلی PDF ضمیمه شده
   approvalStatus: "NOT_REQUIRED" | "PENDING" | "APPROVED" | "REJECTED";
   approvalNote: string | null;
   createdAt: string;
@@ -551,10 +552,18 @@ export function PlatformBooksSection() {
                         در حال تولید محتوای هوشمند…
                       </p>
                     ) : (
-                      <p className="text-[10px] text-muted-foreground tabular-nums">
-                        {faDateTime(b.createdAt)} · {faNum(b.charCount)} نویسه · {faNum(b.quizCount)} سؤال
-                        {b.figuresCount > 0 ? ` · ${faNum(b.figuresCount)} شکل` : ""}
-                      </p>
+                      <>
+                        <p className="text-[10px] text-muted-foreground tabular-nums">
+                          {faDateTime(b.createdAt)} · {faNum(b.charCount)} نویسه · {faNum(b.quizCount)} سؤال
+                          {b.figuresCount > 0 ? ` · ${faNum(b.figuresCount)} شکل` : ""}
+                        </p>
+                        {b.hasOriginalPdf && (
+                          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-[10px] text-emerald-700 dark:text-emerald-400">
+                            <PackageOpen className="h-3 w-3" aria-hidden />
+                            نسخهٔ اصلی PDF ضمیمه است (دانلودی دانش‌آموزان)
+                          </span>
+                        )}
+                      </>
                     )}
 
                     <div className="flex items-center justify-between gap-2 flex-wrap pt-1 border-t border-border/60">
@@ -677,6 +686,8 @@ function BookUploadForm({ onCreated }: { onCreated: () => void }) {
   const [description, setDescription] = useState("");
   const [coverEmoji, setCoverEmoji] = useState("📘");
   const [text, setText] = useState("");
+  const [pdfKey, setPdfKey] = useState<string | null>(null); // Round 20 — کلید PDF اصلی برای ضمیمه شدن به کتاب
+  const [pdfName, setPdfName] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [blocked, setBlocked] = useState<string | null>(null);
 
@@ -696,6 +707,8 @@ function BookUploadForm({ onCreated }: { onCreated: () => void }) {
   // (ریاضی-سوم.pdf → «ریاضی سوم») seeds the title when it is still empty.
   function onPdfExtracted(r: PdfExtractResult) {
     setText(r.text);
+    setPdfKey(r.storageKey ?? null);
+    setPdfName(r.fileName ?? null);
     if (!title.trim()) {
       const suggested = r.fileName
         .replace(/\.pdf$/i, "")
@@ -722,6 +735,8 @@ function BookUploadForm({ onCreated }: { onCreated: () => void }) {
           author: author.trim() || undefined,
           description: description.trim() || undefined,
           coverEmoji,
+          pdfStorageKey: pdfKey || undefined,
+          pdfFileName: pdfName || undefined,
         }),
       });
       toast({
@@ -729,7 +744,7 @@ function BookUploadForm({ onCreated }: { onCreated: () => void }) {
         description: "تولید خلاصه، جزوه، شکل‌ها، نمونه‌سؤال‌ها و پادکست در پس‌زمینه آغاز شد — وضعیت را در فهرست پایین ببینید.",
       });
       setTitle(""); setCurr({}); setAuthor(""); setDescription("");
-      setCoverEmoji("📘"); setText("");
+      setCoverEmoji("📘"); setText(""); setPdfKey(null); setPdfName(null);
       onCreated();
     } catch (e) {
       if (e instanceof ApiClientError) {
@@ -829,10 +844,10 @@ function BookUploadForm({ onCreated }: { onCreated: () => void }) {
 
         <div className="space-y-1.5">
           <Label htmlFor="pb-text" className="text-xs">متن کامل کتاب / جزوه *</Label>
-          <PdfExtractInput idPrefix="pb-pdf" onExtracted={onPdfExtracted} onCleared={() => setText("")} disabled={busy} />
+          <PdfExtractInput idPrefix="pb-pdf" onExtracted={onPdfExtracted} onCleared={() => { setText(""); setPdfKey(null); setPdfName(null); }} disabled={busy} />
           <p className="text-[10px] text-muted-foreground leading-4 flex items-center gap-1">
             <FileText className="h-3 w-3" aria-hidden />
-            فایل PDF کتاب را بارگذاری کنید یا متن را دستی در کادر پایین بچسبانید.
+            فایل PDF کتاب را بارگذاری کنید، لینک مستقیم دانلود آن را بدهید، یا متن را دستی در کادر پایین بچسبانید.
           </p>
           <Textarea
             id="pb-text"

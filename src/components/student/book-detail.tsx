@@ -53,6 +53,7 @@ export interface BookRow {
   podcastStatus: ArtifactStatus;
   podcastDurationSec: number | null;
   quizCount: number;
+  hasOriginalPdf?: boolean; // Round 20 — نسخهٔ اصلی PDF برای دانلود
   createdAt: string;
   scope: "PLATFORM" | "TENANT" | "CLASSROOM";
 }
@@ -83,6 +84,7 @@ export interface BookDetailData extends BookRow {
   quizModels: Array<{ kind: "mc" | "tf" | "fb" | "short"; label: string; count: number }>;
   myAttempts: BookAttempt[];
   errorReason: string | null;
+  hasOriginalPdf: boolean;
 }
 
 interface QuizItem {
@@ -268,6 +270,7 @@ export function BookDetailView({
   // artifacts
   const [docxBusy, setDocxBusy] = useState(false);
   const [notesDocxBusy, setNotesDocxBusy] = useState(false);
+  const [originalPdfBusy, setOriginalPdfBusy] = useState(false);
   const [printOpen, setPrintOpen] = useState(false);
   const [podcastLoading, setPodcastLoading] = useState(false);
   const [podcastUrl, setPodcastUrl] = useState<string | null>(null);
@@ -335,6 +338,31 @@ export function BookDetailView({
   }, [book.id]);
 
   // ── artifacts ──
+  // Round 20 — دانلود نسخهٔ اصلی کتاب (PDF بارگذاری‌شده مدیر/معلم یا دریافت‌شده از لینک)
+  async function downloadOriginalPdf() {
+    setOriginalPdfBusy(true);
+    try {
+      const { blob, filename } = await fetchBlob(`/api/v1/books/${book.id}/original.pdf`);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename || `${book.title.slice(0, 40)}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      toast({ title: "نسخهٔ اصلی کتاب دانلود شد", description: `«${filename}» — خود کتاب PDF.` });
+    } catch (e) {
+      toast({
+        title: "دانلود نسخهٔ اصلی ناموفق بود",
+        description: e instanceof ApiClientError ? e.message : undefined,
+        variant: "destructive",
+      });
+    } finally {
+      setOriginalPdfBusy(false);
+    }
+  }
+
   async function downloadDocx() {
     if (!detail) return;
     setDocxBusy(true);
@@ -507,6 +535,21 @@ export function BookDetailView({
                   {detail?.tenantName && <Badge variant="secondary" className="text-[10px]">{detail.tenantName}</Badge>}
                   <Badge variant="secondary" className="text-[10px] tabular-nums">{faNum(book.charCount)} نویسه</Badge>
                 </div>
+                {(book.hasOriginalPdf ?? detail?.hasOriginalPdf) && (
+                  <Button
+                    size="sm"
+                    onClick={() => void downloadOriginalPdf()}
+                    disabled={originalPdfBusy}
+                    className="mt-3 h-9 bg-gradient-to-l from-emerald-600 to-teal-600 text-white hover:brightness-110 active:scale-[0.98] transition-all"
+                  >
+                    {originalPdfBusy ? (
+                      <Loader2 className="h-4 w-4 animate-spin ml-1.5" aria-hidden />
+                    ) : (
+                      <Download className="h-4 w-4 ml-1.5" aria-hidden />
+                    )}
+                    دانلود نسخهٔ اصلی کتاب (PDF)
+                  </Button>
+                )}
               </div>
             </div>
           </div>

@@ -58,6 +58,16 @@ interface TgMessage {
   chat: TgChat;
   date: number;
   text?: string;
+  document?: TgDocument; // round 20 — آپلود PDF کتاب از خود تلگرام
+  caption?: string;
+}
+
+interface TgDocument {
+  file_id: string;
+  file_unique_id?: string;
+  file_name?: string;
+  mime_type?: string;
+  file_size?: number;
 }
 
 interface TgCallbackQuery {
@@ -156,6 +166,35 @@ interface BooksListData {
   canUploadLabel: string;
   role: string;
   books: BookSummary[];
+}
+
+interface BookSummaryEx extends BookSummary {
+  hasOriginalPdf?: boolean;
+}
+
+interface BookDetailEx extends BookDetail {
+  hasOriginalPdf?: boolean;
+}
+
+interface PdfExtractResult {
+  text: string;
+  pages: number;
+  chars: number;
+  truncated: boolean;
+  fileName: string;
+  storageKey: string;
+  sourceUrl?: string;
+}
+
+interface CreatedBook {
+  id: string;
+  title: string;
+  status: string;
+}
+
+/** ساختار درسی رسمی از اپ اصلی (دوره → پایه → دروس) */
+interface MetaCurriculum {
+  levels: Array<{ code: string; label: string; emoji: string; grades: Array<{ grade: string; subjects: string[] }> }>;
 }
 
 interface QuizFetch {
@@ -562,7 +601,10 @@ async function authed(
   const call = async (): Promise<Response | null> => {
     const headers = new Headers(init?.headers);
     headers.set("authorization", `Bearer ${s.token}`);
-    if (init?.body && !headers.has("content-type")) headers.set("content-type", "application/json");
+    // body متنی → JSON؛ FormData (multipart) → مرز خودش را می‌گذارد (round 20)
+    if (init?.body && typeof init.body === "string" && !headers.has("content-type")) {
+      headers.set("content-type", "application/json");
+    }
     return mainAppFetch(path, { ...init, headers }, timeoutMs);
   };
   let res = await call();
@@ -688,10 +730,11 @@ async function sendHelp(chatId: number): Promise<void> {
     "🎓 <b>باز کردن اپ</b> — مینی‌اپ کامل پلتفرم، همین‌جا داخل تلگرام.",
     "🔗 <b>اتصال حساب</b> — با فرستادن کد ۶ رقمی از بخش پروفایل وب (/link).",
     "🚪 <b>خروج</b> — قطع اتصال حساب تلگرام از پلتفرم (/logout).",
+    "➕ <b>افزودن کتاب</b> — فایل PDF کتاب را بفرستید (/upload): دوره → پایه → درس → عنوان؛ خلاصه، جزوه، شکل، سؤال و پادکست خودکار ساخته می‌شود و خود PDF هم برای دانلود دانش‌آموزان ضمیمه می‌شود. (برای مدیر کل و مدرسه/معلمِ دارای مجوز)",
     "",
     "💡 نکته: نتیجهٔ آزمون‌ها در پلتفرم ثبت می‌شود و با بهبود رکوردتان امتیاز می‌گیرید! 🚀",
     "",
-    "فرمان‌ها: /start · /books · /app · /points · /link · /logout · /help",
+    "فرمان‌ها: /start · /books · /upload · /app · /points · /link · /logout · /help",
   ];
   const kb = appKeyboard();
   await sendMessage(chatId, lines.join("\n"), kb ?? undefined);
@@ -780,6 +823,9 @@ async function sendBooksList(
   if (all.length === 0) {
     text =
       `📚 <b>کتاب‌خانه هوشمند</b>${active ? ` — ${active.emoji} ${esc(active.label)}` : ""}\n\nهنوز کتابی برای شما ثبت نشده است! 🌱\nبه‌محض افزودن کتاب توسط مدیر یا معلمان، همین‌جا نمایش داده می‌شود.`;
+    if (data.canUpload) {
+      text += "\n\n➕ شما می‌توانید همین‌جا اولین کتاب را اضافه کنید — فایل PDF را بفرستید!";
+    }
   } else {
     const structByLevel = new Map<string, number>();
     for (const b of all) {
@@ -792,7 +838,9 @@ async function sendBooksList(
         : "";
     text = `📚 <b>کتاب‌خانه هوشمند</b>${active ? ` — ${active.emoji} ${esc(active.label)}` : ""}\n\n${faNum(all.length)} کتاب برای شما قابل مشاهده است — برای جزئیات، روی عنوان کتاب بزنید.${structText}`;
     if (all.length > books.length) text += `\n(و ${faNum(all.length - books.length)} کتاب دیگر… از نسخهٔ وب)`;
-    if (data.canUpload) text += "\n\n➕ شما می‌توانید کتاب جدید اضافه کنید — از نسخهٔ وب یا مینی‌اپ.";
+  }
+  if (data.canUpload) {
+    kb.push([{ text: "➕ افزودن کتاب جدید (PDF)", callback_data: "upnew" }]);
   }
   if (opts.hint) text += `\n\n💡 ${esc(opts.hint)}`;
 
@@ -869,8 +917,11 @@ async function sendBookCard(
     [{ text: "📒 جزوهٔ شبامتحان", callback_data: `notes:${b.id}` }],
     [{ text: "🎧 پادکست", callback_data: `pod:${b.id}` }],
     [{ text: "✍️ شروع آزمون", callback_data: `quiz:${b.id}` }],
-    [{ text: "🔙 بازگشت", callback_data: "books" }],
   ];
+  if ((b as BookDetailEx).hasOriginalPdf) {
+    kb.splice(2, 0, [{ text: "📥 کتاب اصلی (PDF)", callback_data: `orig:${b.id}` }]);
+  }
+  kb.push([{ text: "🔙 بازگشت", callback_data: "books" }]);
   const text = lines.join("\n");
   if (opts.messageId) await editMessage(chatId, opts.messageId, text, kb);
   else await sendMessage(chatId, text, kb);
@@ -1033,6 +1084,46 @@ async function sendPodcast(chatId: number, from: TgUser, bookId: string): Promis
   if (b.podcastDurationSec) fd.append("duration", String(Math.round(b.podcastDurationSec)));
   const sent = await safeTg<TgMessage>("sendAudio", undefined, { multipart: fd, timeoutMs: 120_000 });
   if (!sent) await sendMessage(chatId, "⚠️ ارسال پادکست ناموفق بود، دوباره تلاش کنید.");
+}
+
+// ─────────────────────────────── کتاب اصلی PDF (round 20) ───────────────────────────────
+
+async function sendOriginalPdf(chatId: number, from: TgUser, bookId: string): Promise<void> {
+  await chatAction(chatId, "upload_document");
+  const dres = await authed(chatId, from, `/api/v1/books/${encodeURIComponent(bookId)}`);
+  if (dres === "unlinked") return void (await promptLink(chatId));
+  const b = dres && dres.ok ? await readJson<BookDetailEx>(dres) : null;
+  if (!b || !b.hasOriginalPdf) {
+    return void (await sendMessage(chatId, "📥 نسخهٔ اصلی (PDF) برای این کتاب ضمیمه نشده است."));
+  }
+  const res = await authed(chatId, from, `/api/v1/books/${encodeURIComponent(bookId)}/original.pdf`, undefined, 90_000);
+  if (res === "unlinked") return void (await promptLink(chatId));
+  if (!res || !res.ok) return void (await sendMessage(chatId, `⚠️ ${esc(apiErrorText(await readJson(res)))}`));
+  const buf = await res.arrayBuffer().catch(() => null);
+  if (!buf || buf.byteLength === 0) return void (await sendMessage(chatId, NET_ERR));
+  if (buf.byteLength > 49 * 1024 * 1024) {
+    return void (await sendMessage(chatId, "⚠️ حجم فایل برای ارسال در تلگرام زیاد است — لطفاً از نسخهٔ وب دانلود کنید."));
+  }
+
+  // نام فایل از Content-Disposition (چندزبانه) — در صورت نبود، از عنوان کتاب
+  let fname = "";
+  const cd = res.headers.get("content-disposition") ?? "";
+  const mStar = /filename\*=UTF-8''([^;]+)/i.exec(cd);
+  const mPlain = /filename="?([^";]+)"?/i.exec(cd);
+  try {
+    if (mStar) fname = decodeURIComponent(mStar[1].trim());
+    else if (mPlain) fname = mPlain[1].trim();
+  } catch {
+    fname = "";
+  }
+  if (!fname) fname = `${safeFilename(b.title)}.pdf`;
+
+  const fd = new FormData();
+  fd.append("chat_id", String(chatId));
+  fd.append("document", new Blob([buf], { type: "application/pdf" }), fname);
+  fd.append("caption", `📥 نسخهٔ اصلی کتاب «${trunc(b.title, 80)}» — پلتفرم آموزش هوشمند ایران 🎓`);
+  const sent = await safeTg<TgMessage>("sendDocument", undefined, { multipart: fd, timeoutMs: 120_000 });
+  if (!sent) await sendMessage(chatId, "⚠️ ارسال فایل ناموفق بود، دوباره تلاش کنید.");
 }
 
 // ─────────────────────────────── آزمون تعاملی ───────────────────────────────
@@ -1457,6 +1548,506 @@ async function doLogout(chatId: number, from: TgUser, cbId?: string): Promise<vo
   );
 }
 
+// ─────────────────────────────── آپلود کتاب از تلگرام (round 20) ───────────────────────────────
+// کاربر فایل PDF را برای بات می‌فرستد → بات آن را از تلگرام دانلود می‌کند →
+// از طریق /api/v1/books/extract-pdf (با توکن نشست خود کاربر) متن استخراج و PDF اصلی
+// نگه داشته می‌شود → ویزارد ۴ گامی: دوره → پایه → درس → عنوان → ثبت کتاب +
+// اجرای خط تولید (خلاصه/جزوه/شکل/نمونه‌سؤال/پادکست). مجوزها همان قواعد وب است.
+
+const TG_FILE_MAX_BYTES = 20 * 1024 * 1024; // سقف دانلود فایل بات‌ها از تلگرام
+const UPLOAD_IDLE_MS = 15 * 60_000; // انقضای ویزارد پس از ۱۵ دقیقه بی‌فعالیتی
+
+interface UploadWizard {
+  chatId: number;
+  tgUser: TgUser;
+  fileName: string;
+  text: string;
+  pages: number;
+  chars: number;
+  storageKey: string;
+  level: string | null;
+  levelLabel: string | null;
+  grade: string | null;
+  subject: string | null;
+  title: string;
+  step: "level" | "grade" | "subject" | "subject_other" | "title" | "title_other" | "confirm";
+  grades: string[]; // فهرست پایه‌های دورهٔ انتخابی (برای ایندکس‌ها)
+  subjects: string[]; // فهرست درس‌های پایهٔ انتخابی
+  lastTouch: number;
+}
+
+const uploadSessions = new Map<number, UploadWizard>();
+
+/** ساختار درسی رسمی را از /api/v1/public/meta می‌گیرد (۱۰ دقیقه کش، پایدار در hot-reload) */
+const gMeta = globalThis as { __tgBotCurr?: { at: number; data: MetaCurriculum } };
+
+async function getCurriculum(): Promise<MetaCurriculum | null> {
+  const cached = gMeta.__tgBotCurr;
+  if (cached && Date.now() - cached.at < 10 * 60_000) return cached.data;
+  const res = await mainAppFetch("/api/v1/public/meta", undefined, 15_000);
+  if (res && res.ok) {
+    const data = await readJson<MetaCurriculum>(res);
+    if (data?.levels?.length) {
+      gMeta.__tgBotCurr = { at: Date.now(), data };
+      return data;
+    }
+  }
+  return cached?.data ?? null;
+}
+
+/** برچسب پایه — ابتدایی «کلاس سوم»، بقیه «پایهٔ هفتم» (همان قرارداد وب) */
+function wizardGradeLabel(level: string | null, grade: string): string {
+  return level === "PRIMARY" ? `کلاس ${grade}` : `پایهٔ ${grade}`;
+}
+
+/** آیا کاربر این چت می‌تواند کتاب اضافه کند؟ (از کش کتاب‌خانه یا فراخوانی تازه) */
+async function canUploadForChat(chatId: number, from: TgUser): Promise<boolean | null> {
+  const cached = chatSessions.get(chatId)?.booksCache;
+  if (cached && Date.now() - cached.at < 60_000) return cached.data.canUpload;
+  const res = await authed(chatId, from, "/api/v1/books");
+  if (res === "unlinked" || !res || !res.ok) return null; // نامشخص — اجازه بده endpoint اصلی تصمیم بگیرد
+  const data = await readJson<BooksListData>(res);
+  if (!data) return null;
+  const s = chatSessions.get(chatId);
+  if (s) s.booksCache = { at: Date.now(), key: "", data };
+  return data.canUpload;
+}
+
+async function sendUploadIntro(chatId: number): Promise<void> {
+  await sendMessage(
+    chatId,
+    [
+      "➕ <b>افزودن کتاب جدید</b>",
+      "",
+      "فایل PDF کتاب را همین‌جا برایم بفرستید تا:",
+      "✅ متن آن به‌صورت خودکار استخراج شود",
+      "🎓 ساختار درسی (دوره → پایه → درس) را انتخاب کنید",
+      "📄 خلاصه، جزوه، شکل، نمونه‌سؤال و پادکست ساخته شود",
+      "📥 نسخهٔ اصلی PDF برای دانلود دانش‌آموزان ضمیمه کتاب شود",
+      "",
+      "📎 سقف آپلود از تلگرام: ۲۰ مگابایت — فایل PDF را بفرستید…",
+    ].join("\n")
+  );
+}
+
+async function onBookDocument(chatId: number, from: TgUser, doc: TgDocument): Promise<void> {
+  const isPdf = (doc.mime_type ?? "").toLowerCase() === "application/pdf" || /\.pdf$/i.test(doc.file_name ?? "");
+  if (!isPdf) {
+    return void (await sendMessage(
+      chatId,
+      "📄 تنها فایل <b>PDF</b> برای افزودن کتاب پشتیبانی می‌شود.\nفایل PDF کتاب را بفرستید 📚 یا از منوی پایین استفاده کنید."
+    ));
+  }
+
+  const s = await getSession(chatId, from);
+  if (!s) return void (await promptLink(chatId));
+
+  // مجوز — همان قواعد وب (ادمین کل همیشه؛ مدرسه/معلم پس از فعال‌سازی مدیر)
+  const can = await canUploadForChat(chatId, from);
+  if (can === false) {
+    return void (await sendMessage(
+      chatId,
+      "⛔ قابلیت افزودن کتاب برای شما فعال نیست.\nمدیر کل پلتفرم باید از بخش «تنظیمات و اتصال‌ها» این قابلیت را برای شما روشن کند."
+    ));
+  }
+
+  const fileName = doc.file_name?.slice(0, 120) || "book.pdf";
+  if (doc.file_size && doc.file_size > TG_FILE_MAX_BYTES) {
+    return void (await sendMessage(
+      chatId,
+      "⚠️ حجم این فایل بیش از ۲۰ مگابایت است (سقف آپلود از تلگرام).\nلطفاً فایل سبک‌تری بفرستید یا از نسخهٔ وب (تا ۲۵ مگابایت) بارگذاری کنید."
+    ));
+  }
+
+  await sendMessage(chatId, `📥 <b>دریافت شد:</b> <code>${esc(fileName)}</code>\n\n⏳ در حال دانلود و استخراج متن… چند لحظه صبر کنید.`);
+  await chatAction(chatId, "upload_document");
+
+  // ۱) دانلود فایل از سرور تلگرام
+  let bytes: Uint8Array | null = null;
+  try {
+    const f = await tg<{ file_path?: string }>("getFile", { file_id: doc.file_id });
+    if (!f.file_path) throw new Error("no file_path");
+    const url = `${TG_API_BASE}/file/bot${state.botToken}/${f.file_path}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`http ${res.status}`);
+    bytes = new Uint8Array(await res.arrayBuffer());
+  } catch (e) {
+    log(`⚠️ getFile/download: ${errStr(e)}`);
+    return void (await sendMessage(chatId, `${NET_ERR}\n\nدانلود فایل از تلگرام ناموفق بود — دوباره بفرستید.`));
+  }
+  if (!bytes || bytes.length === 0) {
+    return void (await sendMessage(chatId, "⚠️ فایل دریافتی خالی به نظر می‌رسد — دوباره بفرستید."));
+  }
+  if (bytes.length > TG_FILE_MAX_BYTES) {
+    return void (await sendMessage(chatId, "⚠️ حجم این فایل بیش از ۲۰ مگابایت است (سقف آپلود از تلگرام)."));
+  }
+
+  // ۲) استخراج متن + نگهداری PDF اصلی (همان endpoint وب، با توکن کاربر)
+  const fd = new FormData();
+  fd.append("file", new Blob([bytes as BlobPart], { type: "application/pdf" }), fileName);
+  const res = await authed(chatId, from, "/api/v1/books/extract-pdf", { method: "POST", body: fd }, 180_000);
+  if (res === "unlinked") return void (await promptLink(chatId));
+  if (!res || !res.ok) {
+    const msg = apiErrorText(await readJson(res));
+    return void (await sendMessage(chatId, `⚠️ ${esc(msg)}\n\nمیتوانید فایل دیگری بفرستید یا از نسخهٔ وب اقدام کنید.`));
+  }
+  const extracted = await readJson<PdfExtractResult>(res);
+  if (!extracted || !extracted.text || !extracted.storageKey) {
+    return void (await sendMessage(chatId, NET_ERR));
+  }
+
+  // ۳) شروع ویزارد ۴ گامی
+  const suggestedTitle = extracted.fileName
+    .replace(/\.pdf$/i, "")
+    .replace(/[_\-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 120);
+
+  const wiz: UploadWizard = {
+    chatId,
+    tgUser: from,
+    fileName: extracted.fileName,
+    text: extracted.text,
+    pages: extracted.pages,
+    chars: extracted.chars,
+    storageKey: extracted.storageKey,
+    level: null,
+    levelLabel: null,
+    grade: null,
+    subject: null,
+    title: suggestedTitle,
+    step: "level",
+    grades: [],
+    subjects: [],
+    lastTouch: Date.now(),
+  };
+  uploadSessions.set(chatId, wiz);
+
+  const intro: string[] = [];
+  intro.push("📘 <b>فایل PDF کتاب دریافت شد!</b>");
+  intro.push("");
+  intro.push(`📄 <code>${esc(wiz.fileName)}</code> — ${faNum(wiz.pages)} صفحه · ${faNum(wiz.chars)} نویسه`);
+  intro.push("✅ متن کتاب استخراج شد و نسخهٔ اصلی PDF نیز ضمیمه کتاب می‌شود.");
+  if (extracted.truncated) intro.push(`⚠️ متن طولانی بود و ${faNum(wiz.chars)} نویسهٔ ابتدایی نگه داشته شد.`);
+  intro.push("");
+  intro.push("حالا مشخصات کتاب را انتخاب کنیم 👇");
+  await sendMessage(chatId, intro.join("\n"));
+  await sendWizardLevel(wiz, s.user.role);
+}
+
+async function sendWizardLevel(w: UploadWizard, role?: string): Promise<void> {
+  w.step = "level";
+  w.lastTouch = Date.now();
+  const meta = await getCurriculum();
+  const levels = meta?.levels ?? [];
+  const rows: InlineKeyboard = [];
+  const btns: InlineButton[] = (levels.length > 0 ? levels.map((l) => ({
+    text: `${l.emoji} ${l.label}`,
+    callback_data: `upld:lvl:${l.code}`,
+  })) : LEVELS_FA.map((l) => ({
+    text: `${l.emoji} ${l.label}`,
+    callback_data: `upld:lvl:${l.code}`,
+  })));
+  for (let i = 0; i < btns.length; i += 2) rows.push(btns.slice(i, i + 2));
+  rows.push([{ text: "❌ انصراف", callback_data: "upld:cancel" }]);
+  const teacherNote = role && role !== "SUPER_ADMIN" ? "\n\nℹ️ کتاب شما پس از تأیید مدیر کل پلتفرم برای دانش‌آموزان نمایش داده می‌شود." : "";
+  await sendMessage(
+    w.chatId,
+    `🎓 <b>گام ۱ از ۴ — دورهٔ تحصیلی</b>\n\nکتاب مربوط به کدام دوره است؟${teacherNote}`,
+    rows
+  );
+}
+
+async function sendWizardGrade(w: UploadWizard): Promise<void> {
+  w.step = "grade";
+  w.lastTouch = Date.now();
+  const meta = await getCurriculum();
+  const lvl = meta?.levels.find((l) => l.code === w.level);
+  // پیش‌دبستانی پایه ندارد → مستقیم انتخاب درس
+  const grades = (lvl?.grades ?? []).map((g) => g.grade).filter((g) => g !== "");
+  if (grades.length === 0) {
+    w.grade = null;
+    return void (await sendWizardSubject(w));
+  }
+  w.grades = grades;
+  const rows: InlineKeyboard = grades.map((g, i) => [
+    { text: wizardGradeLabel(w.level, g), callback_data: `upld:gr:${i}` },
+  ]);
+  rows.push([
+    { text: "↩️ اصلاح دوره", callback_data: "upld:lvl2" },
+    { text: "❌ انصراف", callback_data: "upld:cancel" },
+  ]);
+  await sendMessage(
+    w.chatId,
+    `🎓 <b>گام ۲ از ۴ — ${w.levelLabel}</b>\n\nکتاب برای کدام پایه/کلاس است؟`,
+    rows
+  );
+}
+
+async function sendWizardSubject(w: UploadWizard): Promise<void> {
+  w.step = "subject";
+  w.lastTouch = Date.now();
+  const meta = await getCurriculum();
+  const lvl = meta?.levels.find((l) => l.code === w.level);
+  const subjects = (lvl?.grades.find((g) => g.grade === (w.grade ?? ""))?.subjects ?? []).slice(0, 20);
+  w.subjects = subjects;
+  const rows: InlineKeyboard = subjects.map((s, i) => [
+    { text: trunc(s, 44), callback_data: `upld:sub:${i}` },
+  ]);
+  rows.push([{ text: "➕ سایر (تایپ دستی)", callback_data: "upld:other" }]);
+  rows.push([
+    { text: "↩️ اصلاح پایه", callback_data: "upld:gr2" },
+    { text: "❌ انصراف", callback_data: "upld:cancel" },
+  ]);
+  const gradeBit = w.grade ? ` — ${esc(wizardGradeLabel(w.level, w.grade))}` : "";
+  await sendMessage(
+    w.chatId,
+    `📖 <b>گام ۳ از ۴ — درس</b>\n\nلیست دروس ${esc(w.levelLabel ?? "")}${gradeBit} — کدام درس است؟\n(اگر در فهرست نیست، «سایر» را بزنید و نام درس را تایپ کنید)`,
+    rows
+  );
+}
+
+async function sendWizardTitle(w: UploadWizard): Promise<void> {
+  w.step = "title";
+  w.lastTouch = Date.now();
+  const rows: InlineKeyboard = [];
+  if (w.title.trim().length >= 2) {
+    rows.push([{ text: `✅ «${trunc(w.title, 40)}»`, callback_data: "upld:usetitle" }]);
+  }
+  rows.push([{ text: "⌨️ تایپ عنوان جدید", callback_data: "upld:othertitle" }]);
+  rows.push([
+    { text: "↩️ اصلاح درس", callback_data: "upld:sub2" },
+    { text: "❌ انصراف", callback_data: "upld:cancel" },
+  ]);
+  const gradeBit = w.grade ? ` · ${esc(wizardGradeLabel(w.level, w.grade))}` : "";
+  await sendMessage(
+    w.chatId,
+    `📕 <b>گام ۴ از ۴ — عنوان کتاب</b>\n\n${esc(w.levelLabel ?? "")}${gradeBit}${w.subject ? ` · ${esc(w.subject)}` : ""}\n\nعنوان پیشنهادی از نام فایل: «${esc(w.title)}»\nمی‌توانید بپذیرید، تایپ کنید و بفرستید، یا عنوان دیگری بنویسید.`,
+    rows
+  );
+}
+
+async function sendWizardConfirm(w: UploadWizard): Promise<void> {
+  w.step = "confirm";
+  w.lastTouch = Date.now();
+  const gradeBit = w.grade ? wizardGradeLabel(w.level, w.grade) : null;
+  const lines = [
+    "📕 <b>بازبینی نهایی کتاب</b>",
+    "",
+    `عنوان: <b>${esc(w.title)}</b>`,
+    `دوره: ${esc(w.levelLabel ?? "—")}`,
+    `پایه: ${esc(gradeBit ?? "—")}`,
+    `درس: ${esc(w.subject ?? "—")}`,
+    `متن: ${faNum(w.chars)} نویسه · ${faNum(w.pages)} صفحه`,
+    "PDF اصلی: ضمیمه می‌شود ✅",
+    "",
+    "با ثبت کتاب، تولید <b>خلاصه + جزوه + شکل‌ها + نمونه‌سؤال + پادکست</b> آغاز می‌شود.",
+  ];
+  const rows: InlineKeyboard = [
+    [{ text: "📗 ثبت کتاب", callback_data: "upld:go" }],
+    [
+      { text: "↩️ اصلاح عنوان", callback_data: "upld:sub2" },
+      { text: "❌ انصراف", callback_data: "upld:cancel" },
+    ],
+  ];
+  await sendMessage(w.chatId, lines.join("\n"), rows);
+}
+
+async function submitWizard(w: UploadWizard): Promise<void> {
+  const chatId = w.chatId;
+  await chatAction(chatId, "typing");
+  const res = await authed(
+    chatId,
+    w.tgUser,
+    "/api/v1/books",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        title: w.title.trim().slice(0, 120),
+        text: w.text,
+        level: w.level ?? undefined,
+        gradeLevel: w.grade ?? undefined,
+        subject: w.subject ?? undefined,
+        pdfStorageKey: w.storageKey,
+        pdfFileName: w.fileName,
+      }),
+    },
+    60_000
+  );
+  if (res === "unlinked") {
+    uploadSessions.delete(chatId);
+    return void (await promptLink(chatId));
+  }
+  if (!res || !res.ok) {
+    const msg = apiErrorText(await readJson(res));
+    return void (await sendMessage(
+      chatId,
+      `⚠️ ${esc(msg)}\n\nمی‌توانید اصلاح کنید و دوباره ثبت کنید یا /upload را از نو شروع کنید.`,
+      [
+        [{ text: "↩️ اصلاح عنوان", callback_data: "upld:sub2" }],
+        [{ text: "❌ انصراف", callback_data: "upld:cancel" }],
+      ]
+    ));
+  }
+  const book = await readJson<CreatedBook>(res);
+  uploadSessions.delete(chatId);
+  if (!book?.id) return void (await sendMessage(chatId, NET_ERR));
+
+  const s = chatSessions.get(chatId);
+  const isTeacher = s && s.user.role !== "SUPER_ADMIN";
+  const gradeBit = w.grade ? wizardGradeLabel(w.level, w.grade) : null;
+  const lines = [
+    "🎉 <b>کتاب با موفقیت ثبت شد!</b>",
+    "",
+    `📕 <b>${esc(w.title)}</b>`,
+    `🎓 ${esc([w.levelLabel, gradeBit, w.subject].filter(Boolean).join(" · "))}`,
+    "",
+    "⏳ در حال تولید: خلاصه · جزوه · شکل‌ها · نمونه‌سؤال · پادکست",
+    "چند دقیقه بعد دوباره به کتاب سر بزنید — همه آماده می‌شود! 🌟",
+  ];
+  if (isTeacher) {
+    lines.push("", "📋 این کتاب پس از <b>تأیید مدیر کل پلتفرم</b> برای دانش‌آموزان نمایش داده می‌شود.");
+  }
+  await sendMessage(chatId, lines.join("\n"), [[{ text: "📚 مشاهده کتاب", callback_data: `book:${book.id}` }]]);
+  log(`کتاب جدید از تلگرام ثبت شد (${book.id}) — ${w.title}`);
+}
+
+/** ورودی تایپی ویزارد (عنوان / درس سایر / انصراف) — قبل از برچسب‌های منو صدا می‌شود */
+async function captureWizardInput(chatId: number, text: string): Promise<boolean> {
+  const w = uploadSessions.get(chatId);
+  if (!w) return false;
+  w.lastTouch = Date.now();
+
+  // خروج سریع از ویزارد با برچسب‌های آشنای منو
+  const lower = text.toLowerCase();
+  if (text === "انصراف" || text === "/cancel" || text === "لغو") {
+    uploadSessions.delete(chatId);
+    await sendMessage(chatId, "❌ افزودن کتاب لغو شد.\nهر وقت خواستید دوباره فایل PDF بفرستید یا /upload را بزنید. 📚");
+    return true;
+  }
+  if (text.includes("کتاب‌خانه") || text.includes("کتابخانه")) {
+    uploadSessions.delete(chatId);
+    await sendMessage(chatId, "❌ افزودن کتاب لغو شد — بازگشت به کتاب‌خانه…");
+    await sendBooksList(chatId, w.tgUser, { fresh: true });
+    return true;
+  }
+  if (text === "خروج") {
+    uploadSessions.delete(chatId);
+    await sendLogoutConfirm(chatId, w.tgUser);
+    return true;
+  }
+
+  if (w.step === "subject_other") {
+    const sub = text.trim().slice(0, 60);
+    if (sub.length < 2) {
+      await sendMessage(chatId, "نام درس کوتاه است — دوباره تایپ کنید یا «انصراف» را بفرستید.");
+      return true;
+    }
+    w.subject = sub;
+    await sendWizardTitle(w);
+    return true;
+  }
+
+  if (w.step === "title" || w.step === "title_other") {
+    const t = text.trim().slice(0, 120);
+    if (t.length < 2) {
+      await sendMessage(chatId, "عنوان باید حداقل ۲ نویسه باشد — دوباره بفرستید یا «انصراف» را بزنید.");
+      return true;
+    }
+    w.title = t;
+    await sendWizardConfirm(w);
+    return true;
+  }
+
+  // در گام‌های دکمه‌ای، متن تایپیِ ناشناخته → یادآوری همان گام
+  const stepFa =
+    w.step === "level" ? "انتخاب دورهٔ تحصیلی" : w.step === "grade" ? "انتخاب پایه" : w.step === "subject" ? "انتخاب درس" : "بازبینی نهایی";
+  await sendMessage(
+    chatId,
+    `🔍 الان در گام «${esc(stepFa)}» هستیم — از دکمه‌های زیر استفاده کنید.\nاگر می‌خواهید ول کنید، «انصراف» را بفرستید. 🙏`
+  );
+  return true;
+}
+
+async function onUploadCallback(cb: TgCallbackQuery, chatId: number, messageId: number): Promise<void> {
+  const w = uploadSessions.get(chatId);
+  const data = cb.data ?? "";
+  const a = data.split(":")[1] ?? "";
+
+  if (a === "cancel") {
+    if (w) uploadSessions.delete(chatId);
+    await answerCb(cb.id, "لغو شد");
+    return void (await editMessage(chatId, messageId, "❌ افزودن کتاب لغو شد.\nهر وقت خواستید دوباره فایل PDF بفرستید یا /upload را بزنید. 📚"));
+  }
+  if (!w || w.chatId !== chatId) {
+    return void (await answerCb(cb.id, "این فرم دیگر فعال نیست 🕐"));
+  }
+  w.lastTouch = Date.now();
+
+  if (a === "lvl" || a === "lvl2") {
+    const code = data.split(":")[2] ?? "";
+    const meta = await getCurriculum();
+    const lvl = meta?.levels.find((l) => l.code === code);
+    if (!lvl) return void (await answerCb(cb.id, "دوره نامعتبر"));
+    w.level = lvl.code;
+    w.levelLabel = lvl.label;
+    w.grade = null;
+    w.subject = null;
+    await answerCb(cb.id, `${lvl.emoji} ${lvl.label}`);
+    if (a === "lvl2") await editMessage(chatId, messageId, `🎓 دورهٔ تحصیلی: <b>${esc(lvl.label)}</b>`);
+    return void (await sendWizardGrade(w));
+  }
+  if (a === "gr" || a === "gr2") {
+    const idx = Number(data.split(":")[2] ?? "-1");
+    if (a === "gr") {
+      const g = w.grades[idx];
+      if (!g) return void (await answerCb(cb.id, "پایه نامعتبر"));
+      w.grade = g;
+      await answerCb(cb.id, wizardGradeLabel(w.level, g));
+    } else {
+      await answerCb(cb.id);
+    }
+    return void (await sendWizardSubject(w));
+  }
+  if (a === "sub" || a === "sub2") {
+    if (a === "sub") {
+      const idx = Number(data.split(":")[2] ?? "-1");
+      const sub = w.subjects[idx];
+      if (!sub) return void (await answerCb(cb.id, "درس نامعتبر"));
+      w.subject = sub;
+      await answerCb(cb.id, sub);
+    } else {
+      await answerCb(cb.id);
+    }
+    return void (await sendWizardTitle(w));
+  }
+  if (a === "other") {
+    w.step = "subject_other";
+    await answerCb(cb.id);
+    return void (await sendMessage(
+      chatId,
+      "✏️ نام درس را همین‌جا تایپ کنید و بفرستید (مثلاً: مهارت‌های زندگی).\nیا «انصراف» را بفرستید."
+    ));
+  }
+  if (a === "usetitle") {
+    await answerCb(cb.id);
+    if (!w.title.trim()) w.title = w.fileName.replace(/\.pdf$/i, "").slice(0, 120);
+    return void (await sendWizardConfirm(w));
+  }
+  if (a === "othertitle") {
+    w.step = "title_other";
+    await answerCb(cb.id);
+    return void (await sendMessage(chatId, "⌨️ عنوان کتاب را تایپ کنید و بفرستید (۲ تا ۱۲۰ نویسه)."));
+  }
+  if (a === "go") {
+    await answerCb(cb.id, "در حال ثبت کتاب…");
+    await editMessage(chatId, messageId, "⏳ در حال ثبت کتاب و شروع خط تولید…");
+    return void (await submitWizard(w));
+  }
+  await answerCb(cb.id, "فرمان ناشناخته 🤔");
+}
+
 // ─────────────────────────────── مسیریابی پیام‌ها ───────────────────────────────
 
 async function cmdStart(chatId: number, from: TgUser): Promise<void> {
@@ -1470,9 +2061,13 @@ async function onMessage(m: TgMessage): Promise<void> {
   const chatId = m.chat.id;
   const from = m.from;
   if (!from || from.is_bot) return;
+
+  // ۰-) سند PDF — آپلود کتاب از خود تلگرام (round 20)
+  if (m.document) return void (await onBookDocument(chatId, from, m.document));
+
   const text = (m.text ?? "").trim();
   if (!text) {
-    await sendMessage(chatId, "💬 فعلاً فقط پیام متنی را پشتیبانی می‌کنم 🙏");
+    await sendMessage(chatId, "💬 فعلاً فقط پیام متنی و فایل PDF (برای افزودن کتاب) را پشتیبانی می‌کنم 🙏");
     return;
   }
 
@@ -1485,11 +2080,23 @@ async function onMessage(m: TgMessage): Promise<void> {
   if (cmd === "start") return void (await cmdStart(chatId, from));
   if (cmd === "app") return void (await sendApp(chatId));
   if (cmd === "books") return void (await sendBooksList(chatId, from, { fresh: true }));
+  if (cmd === "upload") {
+    const s = await getSession(chatId, from);
+    if (!s) return void (await promptLink(chatId));
+    return void (await sendUploadIntro(chatId));
+  }
+  if (cmd === "cancel") {
+    if (uploadSessions.has(chatId)) return void (await captureWizardInput(chatId, "انصراف"));
+    return void (await sendMessage(chatId, "چیزی برای لغو نیست ✅"));
+  }
   if (cmd === "points") return void (await sendPoints(chatId, from));
   if (cmd === "help") return void (await sendHelp(chatId));
   if (cmd === "link") return void (await sendLinkGuide(chatId));
   if (cmd === "logout") return void (await sendLogoutConfirm(chatId, from));
   if (cmd) return void (await sendMessage(chatId, "🤔 این فرمان را نمی‌شناسم — /help را امتحان کن 💡"));
+
+  // ۱.۵) ورودی‌های ویزارد آپلود کتاب (عنوان / درس سایر / انصراف) — round 20
+  if (await captureWizardInput(chatId, text)) return;
 
   // ۲) کد اتصال ۶ رقمی
   if (/^\d{6}$/.test(text)) return void (await tryLinkCode(chatId, from, text));
@@ -1500,6 +2107,11 @@ async function onMessage(m: TgMessage): Promise<void> {
   }
   if (text.includes("آزمون")) {
     return void (await sendBooksList(chatId, from, { hint: "یکی از کتاب‌ها را انتخاب کنید و «✍️ شروع آزمون» را بزنید." }));
+  }
+  if (text.includes("افزودن کتاب") || text.includes("کتاب جدید")) {
+    const s = await getSession(chatId, from);
+    if (!s) return void (await promptLink(chatId));
+    return void (await sendUploadIntro(chatId));
   }
   if (text.includes("امتیاز")) return void (await sendPoints(chatId, from));
   if (text.includes("باز کردن اپ")) return void (await sendApp(chatId));
@@ -1556,6 +2168,11 @@ async function onCallback(cb: TgCallbackQuery): Promise<void> {
     case "pod":
       await answerCb(cb.id);
       return void (await sendPodcast(chatId, from, a));
+    case "orig":
+      await answerCb(cb.id);
+      return void (await sendOriginalPdf(chatId, from, a));
+    case "upld":
+      return void (await onUploadCallback(cb, chatId, messageId));
     case "quiz":
       await answerCb(cb.id);
       return void (await sendQuizPicker(chatId, from, a, messageId));
@@ -1574,6 +2191,9 @@ async function onCallback(cb: TgCallbackQuery): Promise<void> {
     case "menu":
       await answerCb(cb.id);
       return void (await cmdStart(chatId, from));
+    case "upnew":
+      await answerCb(cb.id);
+      return void (await sendUploadIntro(chatId));
     default:
       await answerCb(cb.id, "فرمان ناشناخته 🤔");
   }
@@ -1658,6 +2278,7 @@ async function activateBot(): Promise<void> {
       commands: [
         { command: "start", description: "شروع و منوی اصلی" },
         { command: "books", description: "کتاب‌خانه هوشمند" },
+        { command: "upload", description: "افزودن کتاب (ارسال PDF)" },
         { command: "app", description: "باز کردن مینی‌اپ" },
         { command: "points", description: "امتیازهای من" },
         { command: "link", description: "اتصال حساب" },
@@ -1741,6 +2362,15 @@ const cleanTimer = setInterval(() => {
   }
   for (const [chatId, s] of chatSessions) {
     if (now - s.at > SESSION_TTL_MS) chatSessions.delete(chatId);
+  }
+  for (const [chatId, w] of uploadSessions) {
+    if (now - w.lastTouch > UPLOAD_IDLE_MS) {
+      uploadSessions.delete(chatId);
+      void sendMessage(
+        chatId,
+        `⏱ افزودن کتاب (${trunc(w.title || w.fileName, 40)}) به دلیل ${faNum(15)} دقیقه بی‌فعالیت متوقف شد.\nهر وقت خواستید دوباره فایل PDF بفرستید یا /upload را بزنید. 📚`
+      );
+    }
   }
 }, 60_000);
 

@@ -519,6 +519,10 @@ model Book {
   quiz        String? // JSON: {mc:[…],tf:[…],fb:[…],short:[…]}
   quizStatus  String   @default("PENDING")
   quizCount   Int      @default(0)
+  // Round 20 — the ORIGINAL uploaded PDF (file upload or fetched from a download link)
+  // is kept on disk so students can download the actual book (storage/books/<id>-original.pdf).
+  originalPdfPath String? // absolute-ish storage path of the kept original PDF
+  originalPdfName String? // human file name (e.g. ریاضی-سوم.pdf) for downloads
   approvalStatus String @default("NOT_REQUIRED") // NOT_REQUIRED (platform) | PENDING | APPROVED | REJECTED
   approvalNote  String? // e.g. rejection reason shown to the uploader
   errorReason String?

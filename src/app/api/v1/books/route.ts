@@ -28,6 +28,9 @@ export const POST = handler(async (req: NextRequest) => {
     description: body?.description ? String(body.description) : undefined,
     coverEmoji: body?.coverEmoji ? String(body.coverEmoji) : undefined,
     classroomId: body?.classroomId ? String(body.classroomId) : null,
+    // Round 20 — keep the original PDF (from extract-pdf / extract-url) for student download
+    pdfStorageKey: typeof body?.pdfStorageKey === "string" ? body.pdfStorageKey : null,
+    pdfFileName: typeof body?.pdfFileName === "string" ? body.pdfFileName : null,
   });
   return Response.json(book, { status: 201 });
 });

@@ -10,6 +10,7 @@ import { getSettings } from "./settings";
 import { requireFeature } from "./plan";
 import { awardPoints, POINT_REASONS } from "./points";
 import { audit } from "./audit";
+import { attachOriginalPdf } from "./pdf-extract";
 import { isLevelCode, levelLabel, isValidGradeForLevel } from "@/lib/education-levels";
 import type { AuthContext } from "@/server/auth/session";
 
@@ -86,6 +87,10 @@ export interface CreateBookInput {
   description?: string;
   coverEmoji?: string;
   classroomId?: string | null;
+  // Round 20 — keep the original PDF (file upload or fetched from a download link)
+  // so students can download the real book. Both come from the extract endpoints.
+  pdfStorageKey?: string | null;
+  pdfFileName?: string | null;
 }
 
 const EMOJI_RE = /^[\p{Extended_Pictographic}\u2190-\u21FF\u2600-\u27BF]$/u;
@@ -151,6 +156,18 @@ export async function createBook(ctx: AuthContext, input: CreateBookInput) {
     },
   });
 
+  // Round 20 — جابه‌جایی PDF اصلی (اگر از فایل یا لینک آمده) کنار ردیف کتاب
+  let created = book;
+  if (input.pdfStorageKey) {
+    const attached = await attachOriginalPdf(book.id, input.pdfStorageKey, input.pdfFileName);
+    if (attached) {
+      created = await db.book.update({
+        where: { id: book.id },
+        data: { originalPdfPath: attached.path, originalPdfName: attached.name },
+      });
+    }
+  }
+
   await audit({
     actorId: ctx.userId,
     tenantId: book.tenantId,
@@ -162,6 +179,7 @@ export async function createBook(ctx: AuthContext, input: CreateBookInput) {
       charCount: text.length,
       scope: book.tenantId ? "tenant" : "platform",
       approval: book.approvalStatus,
+      withOriginalPdf: Boolean(input.pdfStorageKey),
     },
   });
 
@@ -175,10 +193,8 @@ export async function createBook(ctx: AuthContext, input: CreateBookInput) {
       .catch(() => undefined);
   });
 
-  return bookSummary(book);
+  return bookSummary(created);
 }
-
-// ── Approval workflow (round 18) ──
 
 export async function reviewBookApproval(
   ctx: AuthContext,
@@ -661,6 +677,8 @@ function bookSummary(book: {
   quizCount: number;
   approvalStatus: string;
   approvalNote: string | null;
+  originalPdfPath: string | null;
+  originalPdfName: string | null;
   createdAt: Date;
   tenantId: string | null;
   classroomId: string | null;
@@ -688,6 +706,7 @@ function bookSummary(book: {
     quizCount: book.quizCount,
     approvalStatus: book.approvalStatus,
     approvalNote: book.approvalNote,
+    hasOriginalPdf: Boolean(book.originalPdfPath),
     createdAt: book.createdAt,
     scope: book.tenantId ? (book.classroomId ? "CLASSROOM" : "TENANT") : "PLATFORM",
     addedById: book.addedById,
@@ -821,6 +840,9 @@ export async function deleteBook(ctx: AuthContext, bookId: string) {
   }
   if (book.podcastPath) {
     await fs.rm(book.podcastPath, { force: true }).catch(() => undefined);
+  }
+  if (book.originalPdfPath) {
+    await fs.rm(book.originalPdfPath, { force: true }).catch(() => undefined);
   }
   await db.book.delete({ where: { id: bookId } });
   await audit({
@@ -1069,6 +1091,20 @@ export async function listMyBookAttempts(ctx: AuthContext, bookId: string) {
 }
 
 // ── Podcast artifact ──
+
+// ── Original PDF (round 20 — the real book, file-upload or fetched-from-link) ──
+
+export async function bookOriginalPdf(ctx: AuthContext, bookId: string) {
+  const book = await visibleBook(ctx, bookId);
+  if (!book.originalPdfPath) {
+    throw Errors.notFound("نسخهٔ اصلی (PDF) این کتاب");
+  }
+  const stat = await fs.stat(book.originalPdfPath).catch(() => null);
+  if (!stat) throw Errors.notFound("فایل PDF کتاب");
+  const data = await fs.readFile(book.originalPdfPath);
+  const name = (book.originalPdfName ?? `${book.title}.pdf`).replace(/[\\/:*?"<>|\n\r]/g, "_").slice(0, 100);
+  return { data, filename: /\.pdf$/i.test(name) ? name : `${name}.pdf` };
+}
 
 export async function bookPodcast(ctx: AuthContext, bookId: string) {
   const book = await visibleBook(ctx, bookId);
