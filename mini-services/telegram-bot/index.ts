@@ -13,7 +13,7 @@
  *   • کاربران با «کد اتصال ۶ رقمی» حساب خود را متصل می‌کنند
  *       POST /api/v1/internal/telegram/link  (X-Bot-Secret)
  *     و برای هر چت یک session token کش می‌شود که برای فراخوانی‌های Bearer به‌کار می‌رود.
- *   • کتاب‌خانه/خلاصه (متن + Word)/پادکست (WAV)/آزمون تعاملی/امتیازها — همه از
+ *   • کتاب‌خانه/خلاصه (متن + PDF فارسی)/پادکست (WAV)/آزمون تعاملی/امتیازها — همه از
  *     همان API عمومی نسخهٔ وب (/api/v1/books، /api/v1/me/points، …).
  *
  *  قواعد:
@@ -59,7 +59,17 @@ interface TgMessage {
   date: number;
   text?: string;
   document?: TgDocument; // round 20 — آپلود PDF کتاب از خود تلگرام
+  contact?: TgContact; // round 22 — ورود با شمارهٔ موبایل (request_contact)
   caption?: string;
+}
+
+/** مخاطب به‌اشتراک‌گذاشته‌شده (دکمهٔ reply با request_contact — راند ۲۲) */
+interface TgContact {
+  phone_number: string;
+  first_name?: string;
+  last_name?: string;
+  user_id?: number;
+  user?: TgUser;
 }
 
 interface TgDocument {
@@ -596,6 +606,21 @@ function apiErrorText(data: unknown): string {
   return typeof msg === "string" && msg.trim() ? msg.trim() : "ارتباط با سرور برقرار نشد، دوباره تلاش کنید.";
 }
 
+/** نام فایل فارسی از Content-Disposition (filename* چندزبانه) — در صورت نبود، fallback (راند ۲۲) */
+function fileNameFromResponse(res: Response | null | undefined, fallback: string): string {
+  const cd = res?.headers.get("content-disposition") ?? "";
+  const mStar = /filename\*=UTF-8''([^;]+)/i.exec(cd);
+  const mPlain = /filename="?([^";]+)"?/i.exec(cd);
+  let fname = "";
+  try {
+    if (mStar) fname = decodeURIComponent(mStar[1].trim());
+    else if (mPlain) fname = mPlain[1].trim();
+  } catch {
+    fname = "";
+  }
+  return fname || fallback;
+}
+
 /** resolve نشست کاربر تلگرام از اپ اصلی (server-to-server با X-Bot-Secret) */
 async function resolveSession(
   tgId: number
@@ -693,11 +718,26 @@ function mainMenuReply(): Record<string, unknown> {
   };
 }
 
+/**
+ * راند ۲۲ — کیبورد پاسخ برای کاربران متصل‌نشده: دکمهٔ «📱 ورود با شمارهٔ موبایل»
+ * (request_contact → تلگرام شمارهٔ کاربر را برای بات می‌فرستد) + مسیر کد ۶ رقمی.
+ */
+function linkPhoneReply(): Record<string, unknown> {
+  return {
+    keyboard: [
+      [{ text: "📱 ورود با شمارهٔ موبایل", request_contact: true }],
+      [{ text: "🔗 اتصال با کد ۶ رقمی" }],
+    ],
+    resize_keyboard: true,
+  };
+}
+
 async function promptLink(chatId: number): Promise<void> {
   await sendMessage(
     chatId,
-    "🔐 برای این کار ابتدا باید حساب خود را متصل کنید.\n\nبرای اتصال، در نسخهٔ وب (یا مینی‌اپ) وارد حساب خود شوید و از بخش پروفایل کد اتصال بگیرید، سپس آن را همین‌جا بفرستید.",
-    [[{ text: "🔗 اتصال حساب من", callback_data: "link" }]]
+    "🔐 برای این کار ابتدا باید حساب خود را متصل کنید.\n\n📱 اگر شمارهٔ موبایلی که در حساب وب‌تان ثبت کرده‌اید با شمارهٔ تلگرام‌تان یکی است، دکمهٔ «📱 ورود با شمارهٔ موبایل» پایین را بزنید تا مستقیم وارد شوید.\n\n🔗 یا در نسخهٔ وب (یا مینی‌اپ) وارد حساب خود شوید و از بخش پروفایل «کد اتصال» بگیرید و همان ۶ رقم را همین‌جا بفرستید.",
+    [[{ text: "🔗 اتصال با کد ۶ رقمی", callback_data: "link" }]],
+    linkPhoneReply()
   );
 }
 
@@ -710,17 +750,22 @@ async function sendWelcomeUnlinked(chatId: number, from: TgUser): Promise<void> 
     "",
     "من همراه همیشگی شما برای یادگیری هستم و می‌توانم:",
     "📚 کتاب‌خانهٔ هوشمند شما را نشان دهم",
-    "📄 خلاصهٔ کتاب‌ها را بفرستم (متن + فایل Word)",
+    "📄 خلاصهٔ کتاب‌ها را بفرستم (متن + فایل PDF با فونت فارسی)",
     "🎧 پادکست صوتی کتاب‌ها را برایتان بفرستم",
     "✍️ با نمونه‌سؤال‌های هوشمند محکتان کنم",
     "⭐ امتیازها و رکوردهایتان را دنبال کنم",
     "",
-    "برای شروع، حساب کاربری‌تان را متصل کنید 👇",
+    "برای شروع، یکی از دو راه اتصال را انتخاب کنید 👇",
   ];
-  await sendMessage(chatId, lines.join("\n"), [[{ text: "🔗 اتصال حساب من", callback_data: "link" }]]);
   await sendMessage(
     chatId,
-    "برای اتصال، در نسخهٔ وب (یا مینی‌اپ) وارد حساب خود شوید و از بخش پروفایل کد اتصال بگیرید، سپس آن را همین‌جا بفرستید. 🔢"
+    lines.join("\n"),
+    [[{ text: "🔗 اتصال با کد ۶ رقمی", callback_data: "link" }]],
+    linkPhoneReply()
+  );
+  await sendMessage(
+    chatId,
+    "📱 <b>ورود سریع:</b> اگر شمارهٔ موبایلی که در حساب وب‌تان ثبت کرده‌اید با شمارهٔ تلگرام‌تان یکی است، دکمهٔ «📱 ورود با شمارهٔ موبایل» پایین را بزنید تا مستقیم وارد شوید.\n\n🔗 <b>راه دیگر:</b> در نسخهٔ وب (یا مینی‌اپ) وارد حساب خود شوید و از بخش پروفایل «کد اتصال» بگیرید و همان ۶ رقم را همین‌جا بفرستید. 🔢"
   );
 }
 
@@ -762,13 +807,15 @@ async function sendHelp(chatId: number): Promise<void> {
     "ℹ️ <b>راهنمای بات آموزش هوشمند</b>",
     "",
     "📚 <b>کتاب‌خانه</b> — فهرست کتاب‌های هوشمند شما با فیلتر دورهٔ تحصیلی؛ هر کتاب دارای خلاصه، جزوه، شکل، نمونه‌سؤال و پادکست است.",
-    "📄 <b>خلاصهٔ کتاب</b> — خلاصهٔ کامل به‌صورت متن + فایل Word قابل دانلود.",
-    "📒 <b>جزوهٔ شبامتحان</b> — تعاریف، فرمول‌ها و نکات کنکوری، به‌صورت متن + Word.",
+    "📄 <b>خلاصهٔ کتاب</b> — خلاصهٔ کامل به‌صورت متن + فایل PDF با فونت فارسی (وزیرمتن).",
+    "📒 <b>جزوهٔ شبامتحان</b> — تعاریف، فرمول‌ها و نکات کنکوری، به‌صورت متن + PDF با فونت فارسی.",
     "🎧 <b>پادکست صوتی</b> — نسخهٔ شنیداری کتاب؛ در مسیر هم گوش بدهید!",
+    "📥 <b>ذخیره در پیام‌های ذخیره</b> — پادکست و کتاب اصلی را با یک دکمه داخل خود تلگرام نگه دارید.",
     "✍️ <b>آزمون نمونه</b> — چهارگزینه‌ای، درست/غلط، جای خالی، ترکیبی و تشریحی؛ همراه با مرور کامل پاسخ‌ها.",
+    "📝 <b>نمونه‌سؤال PDF</b> — برگهٔ رسمی آزمون (۴ گزینه‌ای) + پاسخ‌نامهٔ تشریحی، PDF با فونت فارسی.",
     "⭐ <b>امتیازهای من</b> — مجموع امتیاز، ۳۰ روز اخیر و آخرین دستاوردها.",
     "🎓 <b>باز کردن اپ</b> — مینی‌اپ کامل پلتفرم، همین‌جا داخل تلگرام.",
-    "🔗 <b>اتصال حساب</b> — با فرستادن کد ۶ رقمی از بخش پروفایل وب (/link).",
+    "🔗 <b>اتصال حساب</b> — با کد ۶ رقمی از بخش پروفایل وب (/link) یا 📱 ورود با شمارهٔ موبایل.",
     "🚪 <b>خروج</b> — قطع اتصال حساب تلگرام از پلتفرم (/logout).",
     "➕ <b>افزودن کتاب</b> — فایل PDF کتاب را بفرستید (/upload): دوره → پایه → درس → عنوان؛ خلاصه، جزوه، شکل، سؤال و پادکست خودکار ساخته می‌شود و خود PDF هم برای دانلود دانش‌آموزان ضمیمه می‌شود. (برای مدیر کل و مدرسه/معلمِ دارای مجوز)",
     "",
@@ -953,11 +1000,15 @@ async function sendBookCard(
   lines.push("", "💡 شکل‌های آموزشی را در نسخهٔ وب/مینی‌اپ کتاب ببینید.");
 
   const kb: InlineKeyboard = [
-    [{ text: "📄 خلاصه", callback_data: `sum:${b.id}` }],
-    [{ text: "📒 جزوهٔ شبامتحان", callback_data: `notes:${b.id}` }],
+    [{ text: "📄 خلاصه (PDF)", callback_data: `sum:${b.id}` }],
+    [{ text: "📒 جزوه (PDF)", callback_data: `notes:${b.id}` }],
     [{ text: "🎧 پادکست", callback_data: `pod:${b.id}` }],
     [{ text: "✍️ شروع آزمون", callback_data: `quiz:${b.id}` }],
   ];
+  // راند ۲۲ — برگهٔ رسمی نمونه‌سؤال به‌صورت PDF (فقط وقتی سؤال‌ها آماده‌اند)
+  if (b.quizStatus === "READY") {
+    kb.push([{ text: "✍️ نمونه‌سؤال (PDF)", callback_data: `quizpdf:${b.id}` }]);
+  }
   if ((b as BookDetailEx).hasOriginalPdf) {
     kb.splice(2, 0, [{ text: "📥 کتاب اصلی (PDF)", callback_data: `orig:${b.id}` }]);
   }
@@ -967,7 +1018,7 @@ async function sendBookCard(
   else await sendMessage(chatId, text, kb);
 }
 
-// ─────────────────────────────── خلاصه (متن + Word) ───────────────────────────────
+// ─────────────────────────────── خلاصه (متن + PDF فارسی — round 18/22) ───────────────────────────────
 
 async function sendSummary(chatId: number, from: TgUser, bookId: string): Promise<void> {
   await chatAction(chatId, "typing");
@@ -991,8 +1042,8 @@ async function sendSummary(chatId: number, from: TgUser, bookId: string): Promis
     let text = prefix + chunks[i];
     let kb: InlineKeyboard | undefined;
     if (isLast) {
-      text += "\n\n💡 در نسخهٔ وب می‌توانید با «چاپ صفحه» نسخهٔ PDF هم دریافت کنید.";
-      kb = [[{ text: "📥 دریافت نسخهٔ Word", callback_data: `docx:${b.id}` }]];
+      text += "\n\n💡 نسخهٔ PDF با فونت فارسی (وزیرمتن) هم از دکمهٔ زیر قابل دریافت است.";
+      kb = [[{ text: "📄 دریافت فایل PDF", callback_data: `docx:${b.id}` }]];
     }
     await sendMessage(chatId, text, kb);
     if (!isLast) await sleep(350);
@@ -1008,10 +1059,11 @@ async function sendDocx(chatId: number, from: TgUser, bookId: string): Promise<v
   if (!b || b.summaryStatus !== "READY") {
     return void (await sendMessage(chatId, "📄 خلاصهٔ این کتاب هنوز آماده نشده است."));
   }
-  const res = await authed(chatId, from, `/api/v1/books/${encodeURIComponent(bookId)}/summary.docx`, undefined, 90_000);
+  // راند ۲۲ — خلاصه به‌صورت PDF فارسی (فونت وزیرمتن جاسازی‌شده؛ Chromium سمت سرور → مهلت بلند)
+  const res = await authed(chatId, from, `/api/v1/books/${encodeURIComponent(bookId)}/summary.pdf`, undefined, 110_000);
   if (res === "unlinked") return void (await promptLink(chatId));
   if (!res || !res.ok) return void (await sendMessage(chatId, `⚠️ ${esc(apiErrorText(await readJson(res)))}`));
-  const buf = await readArrayBuffer(res, 90_000);
+  const buf = await readArrayBuffer(res, 100_000);
   if (!buf || buf.byteLength === 0) return void (await sendMessage(chatId, NET_ERR));
   if (buf.byteLength > 49 * 1024 * 1024) {
     return void (await sendMessage(chatId, "⚠️ حجم فایل برای ارسال در تلگرام زیاد است — لطفاً از نسخهٔ وب دانلود کنید."));
@@ -1019,17 +1071,13 @@ async function sendDocx(chatId: number, from: TgUser, bookId: string): Promise<v
 
   const fd = new FormData();
   fd.append("chat_id", String(chatId));
-  fd.append(
-    "document",
-    new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" }),
-    `${safeFilename(b.title)}.docx`
-  );
-  fd.append("caption", `📄 خلاصهٔ Word کتاب «${trunc(b.title, 80)}» — پلتفرم آموزش هوشمند ایران 🎓`);
+  fd.append("document", new Blob([buf], { type: "application/pdf" }), fileNameFromResponse(res, `${safeFilename(b.title)}.pdf`));
+  fd.append("caption", `📄 خلاصهٔ هوشمند کتاب «${trunc(b.title, 80)}» — PDF با فونت فارسی (وزیرمتن)`);
   const sent = await safeTg<TgMessage>("sendDocument", undefined, { multipart: fd, timeoutMs: 120_000 });
   if (!sent) await sendMessage(chatId, "⚠️ ارسال فایل ناموفق بود، دوباره تلاش کنید.");
 }
 
-// ─────────────────────────────── جزوهٔ شبامتحان (متن + Word — round 18) ───────────────────────────────
+// ─────────────────────────────── جزوهٔ شبامتحان (متن + PDF — round 18/22) ───────────────────────────────
 
 async function sendNotes(chatId: number, from: TgUser, bookId: string): Promise<void> {
   await chatAction(chatId, "typing");
@@ -1053,8 +1101,8 @@ async function sendNotes(chatId: number, from: TgUser, bookId: string): Promise<
     let text = prefix + chunks[i];
     let kb: InlineKeyboard | undefined;
     if (isLast) {
-      text += "\n\n💡 تعاریف، فرمول‌ها و نکات کنکوری — برای مرور سریع شبامتحان.";
-      kb = [[{ text: "📥 دریافت نسخهٔ Word جزوه", callback_data: `notesdocx:${b.id}` }]];
+      text += "\n\n💡 تعاریف، فرمول‌ها و نکات کنکوری — نسخهٔ PDF با فونت فارسی (وزیرمتن) از دکمهٔ زیر قابل دریافت است.";
+      kb = [[{ text: "📒 دریافت فایل PDF جزوه", callback_data: `notesdocx:${b.id}` }]];
     }
     await sendMessage(chatId, text, kb);
     if (!isLast) await sleep(350);
@@ -1069,10 +1117,11 @@ async function sendNotesDocx(chatId: number, from: TgUser, bookId: string): Prom
   if (!b || b.studyNotesStatus !== "READY") {
     return void (await sendMessage(chatId, "📒 جزوهٔ این کتاب هنوز آماده نشده است."));
   }
-  const res = await authed(chatId, from, `/api/v1/books/${encodeURIComponent(bookId)}/notes.docx`, undefined, 90_000);
+  // راند ۲۲ — جزوه به‌صورت PDF فارسی (فونت وزیرمتن جاسازی‌شده)
+  const res = await authed(chatId, from, `/api/v1/books/${encodeURIComponent(bookId)}/notes.pdf`, undefined, 110_000);
   if (res === "unlinked") return void (await promptLink(chatId));
   if (!res || !res.ok) return void (await sendMessage(chatId, `⚠️ ${esc(apiErrorText(await readJson(res)))}`));
-  const buf = await readArrayBuffer(res, 90_000);
+  const buf = await readArrayBuffer(res, 100_000);
   if (!buf || buf.byteLength === 0) return void (await sendMessage(chatId, NET_ERR));
   if (buf.byteLength > 49 * 1024 * 1024) {
     return void (await sendMessage(chatId, "⚠️ حجم فایل برای ارسال در تلگرام زیاد است — لطفاً از نسخهٔ وب دانلود کنید."));
@@ -1080,19 +1129,15 @@ async function sendNotesDocx(chatId: number, from: TgUser, bookId: string): Prom
 
   const fd = new FormData();
   fd.append("chat_id", String(chatId));
-  fd.append(
-    "document",
-    new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" }),
-    `jozve-${safeFilename(b.title)}.docx`
-  );
-  fd.append("caption", `📒 جزوهٔ شبامتحان کتاب «${trunc(b.title, 80)}» — پلتفرم آموزش هوشمند ایران 🎓`);
+  fd.append("document", new Blob([buf], { type: "application/pdf" }), fileNameFromResponse(res, `jozve-${safeFilename(b.title)}.pdf`));
+  fd.append("caption", `📒 جزوهٔ شبامتحان کتاب «${trunc(b.title, 80)}» — PDF با فونت فارسی (وزیرمتن)`);
   const sent = await safeTg<TgMessage>("sendDocument", undefined, { multipart: fd, timeoutMs: 120_000 });
   if (!sent) await sendMessage(chatId, "⚠️ ارسال فایل ناموفق بود، دوباره تلاش کنید.");
 }
 
 // ─────────────────────────────── پادکست (WAV) ───────────────────────────────
 
-async function sendPodcast(chatId: number, from: TgUser, bookId: string): Promise<void> {
+async function sendPodcast(chatId: number, from: TgUser, bookId: string, opts: { forSaved?: boolean } = {}): Promise<void> {
   await chatAction(chatId, "upload_voice");
   const dres = await authed(chatId, from, `/api/v1/books/${encodeURIComponent(bookId)}`);
   if (dres === "unlinked") return void (await promptLink(chatId));
@@ -1117,18 +1162,29 @@ async function sendPodcast(chatId: number, from: TgUser, bookId: string): Promis
   fd.append("audio", new Blob([buf], { type: "audio/wav" }), `${safeFilename(b.title)}.wav`);
   fd.append("title", trunc(`پادکست کتاب ${b.title}`, 64));
   fd.append("performer", "پلتفرم آموزش هوشمند");
-  const caption = `🎧 پادکست صوتی کتاب «${trunc(b.title, 80)}»${
-    b.podcastDurationSec ? ` — ${durationFa(b.podcastDurationSec)}` : ""
-  }\nشنیدن شما خوش! 🎶`;
+  // راند ۲۲ — دکمهٔ «ذخیره در پیام‌های ذخیره» زیر پادکست (نسخهٔ ذخیره: بدون دکمه + پیشوند 📌)
+  const caption = opts.forSaved
+    ? `📌 ذخیره‌شده از پلتفرم آموزش هوشمند — 🎧 پادکست صوتی کتاب «${trunc(b.title, 80)}»${
+        b.podcastDurationSec ? ` — ${durationFa(b.podcastDurationSec)}` : ""
+      }\nشنیدن شما خوش! 🎶`
+    : `🎧 پادکست صوتی کتاب «${trunc(b.title, 80)}»${
+        b.podcastDurationSec ? ` — ${durationFa(b.podcastDurationSec)}` : ""
+      }\nشنیدن شما خوش! 🎶\nبرای نگه‌داشتن در تلگرام، دکمهٔ ذخیره را بزنید. 📥`;
   fd.append("caption", caption);
   if (b.podcastDurationSec) fd.append("duration", String(Math.round(b.podcastDurationSec)));
+  if (!opts.forSaved) {
+    fd.append(
+      "reply_markup",
+      JSON.stringify({ inline_keyboard: [[{ text: "📥 ذخیره در پیام‌های ذخیره", callback_data: `podsave:${bookId}` }]] })
+    );
+  }
   const sent = await safeTg<TgMessage>("sendAudio", undefined, { multipart: fd, timeoutMs: 120_000 });
   if (!sent) await sendMessage(chatId, "⚠️ ارسال پادکست ناموفق بود، دوباره تلاش کنید.");
 }
 
 // ─────────────────────────────── کتاب اصلی PDF (round 20) ───────────────────────────────
 
-async function sendOriginalPdf(chatId: number, from: TgUser, bookId: string): Promise<void> {
+async function sendOriginalPdf(chatId: number, from: TgUser, bookId: string, opts: { forSaved?: boolean } = {}): Promise<void> {
   await chatAction(chatId, "upload_document");
   const dres = await authed(chatId, from, `/api/v1/books/${encodeURIComponent(bookId)}`);
   if (dres === "unlinked") return void (await promptLink(chatId));
@@ -1145,23 +1201,61 @@ async function sendOriginalPdf(chatId: number, from: TgUser, bookId: string): Pr
     return void (await sendMessage(chatId, "⚠️ حجم فایل برای ارسال در تلگرام زیاد است — لطفاً از نسخهٔ وب دانلود کنید."));
   }
 
-  // نام فایل از Content-Disposition (چندزبانه) — در صورت نبود، از عنوان کتاب
-  let fname = "";
-  const cd = res.headers.get("content-disposition") ?? "";
-  const mStar = /filename\*=UTF-8''([^;]+)/i.exec(cd);
-  const mPlain = /filename="?([^";]+)"?/i.exec(cd);
-  try {
-    if (mStar) fname = decodeURIComponent(mStar[1].trim());
-    else if (mPlain) fname = mPlain[1].trim();
-  } catch {
-    fname = "";
-  }
-  if (!fname) fname = `${safeFilename(b.title)}.pdf`;
+  // نام فایل فارسی از Content-Disposition — در صورت نبود، از عنوان کتاب
+  const fname = fileNameFromResponse(res, `${safeFilename(b.title)}.pdf`);
 
   const fd = new FormData();
   fd.append("chat_id", String(chatId));
   fd.append("document", new Blob([buf], { type: "application/pdf" }), fname);
-  fd.append("caption", `📥 نسخهٔ اصلی کتاب «${trunc(b.title, 80)}» — پلتفرم آموزش هوشمند ایران 🎓`);
+  fd.append(
+    "caption",
+    opts.forSaved
+      ? `📌 ذخیره‌شده از پلتفرم آموزش هوشمند — 📥 نسخهٔ اصلی کتاب «${trunc(b.title, 80)}»`
+      : `📥 نسخهٔ اصلی کتاب «${trunc(b.title, 80)}» — پلتفرم آموزش هوشمند ایران 🎓\nبرای نگه‌داشتن در تلگرام، دکمهٔ ذخیره را بزنید. 📥`
+  );
+  // راند ۲۲ — دکمهٔ «ذخیره در پیام‌های ذخیره» زیر فایل (نسخهٔ ذخیره: بدون دکمه)
+  if (!opts.forSaved) {
+    fd.append(
+      "reply_markup",
+      JSON.stringify({ inline_keyboard: [[{ text: "📥 ذخیره در پیام‌های ذخیره", callback_data: `origsave:${bookId}` }]] })
+    );
+  }
+  const sent = await safeTg<TgMessage>("sendDocument", undefined, { multipart: fd, timeoutMs: 120_000 });
+  if (!sent) await sendMessage(chatId, "⚠️ ارسال فایل ناموفق بود، دوباره تلاش کنید.");
+}
+
+// ─────────────────────────────── نمونه‌سؤال PDF (راند ۲۲) ───────────────────────────────
+
+/** برگهٔ رسمی نمونه‌سؤال (۴ گزینه‌ای) + پاسخ‌نامهٔ تشریحی — PDF با فونت فارسی (وزیرمتن) */
+async function sendQuizPdf(chatId: number, from: TgUser, bookId: string): Promise<void> {
+  await chatAction(chatId, "upload_document");
+  // وضعیت کتاب — سؤال‌ها باید READY باشند (مثل sendPodcast جزئیات را اول می‌خوانیم)
+  const dres = await authed(chatId, from, `/api/v1/books/${encodeURIComponent(bookId)}`);
+  if (dres === "unlinked") return void (await promptLink(chatId));
+  const b = dres && dres.ok ? await readJson<BookDetail>(dres) : null;
+  if (!b) return void (await sendMessage(chatId, NET_ERR));
+  if (b.quizStatus !== "READY") {
+    return void (await sendMessage(
+      chatId,
+      `✍️ نمونه‌سؤال‌های این کتاب هنوز آماده نشده است.\n${statusFa(b.quizStatus)} — کمی بعد دوباره تلاش کنید. 🙏`
+    ));
+  }
+  const res = await authed(chatId, from, `/api/v1/books/${encodeURIComponent(bookId)}/quiz.pdf?model=MC`, undefined, 110_000);
+  if (res === "unlinked") return void (await promptLink(chatId));
+  if (!res || !res.ok) return void (await sendMessage(chatId, `⚠️ ${esc(apiErrorText(await readJson(res)))}`));
+  const buf = await readArrayBuffer(res, 100_000);
+  if (!buf || buf.byteLength === 0) return void (await sendMessage(chatId, NET_ERR));
+  if (buf.byteLength > 49 * 1024 * 1024) {
+    return void (await sendMessage(chatId, "⚠️ حجم فایل برای ارسال در تلگرام زیاد است — لطفاً از نسخهٔ وب دانلود کنید."));
+  }
+
+  const fd = new FormData();
+  fd.append("chat_id", String(chatId));
+  fd.append("document", new Blob([buf], { type: "application/pdf" }), fileNameFromResponse(res, `azmoon-${safeFilename(b.title)}.pdf`));
+  fd.append(
+    "caption",
+    `✍️ نمونه‌سؤال هوشمند کتاب «${trunc(b.title, 80)}» — برگهٔ رسمی آزمون (۴ گزینه‌ای) + پاسخ‌نامهٔ تشریحی · PDF با فونت فارسی`
+  );
   const sent = await safeTg<TgMessage>("sendDocument", undefined, { multipart: fd, timeoutMs: 120_000 });
   if (!sent) await sendMessage(chatId, "⚠️ ارسال فایل ناموفق بود، دوباره تلاش کنید.");
 }
@@ -1524,7 +1618,51 @@ async function tryLinkCode(chatId: number, from: TgUser, code: string): Promise<
   await sendMessage(
     chatId,
     `❌ ${esc(msg)}\n\nکد جدیدی از بخش پروفایل نسخهٔ وب بگیرید و دوباره بفرستید. 🔢`,
-    [[{ text: "🔗 اتصال حساب من", callback_data: "link" }]]
+    [[{ text: "🔗 اتصال با کد ۶ رقمی", callback_data: "link" }]],
+    linkPhoneReply()
+  );
+}
+
+/**
+ * راند ۲۲ — ورود با شمارهٔ موبایل: کاربر با دکمهٔ «📱 ورود با شمارهٔ موبایل»
+ * (request_contact) شمارهٔ خود را فرستاده؛ اگر با شمارهٔ حساب وب یکی باشد،
+ * اتصال خودکار انجام می‌شود (POST /api/v1/internal/telegram/link-phone با X-Bot-Secret).
+ */
+async function tryLinkPhone(chatId: number, from: TgUser, phone: string): Promise<void> {
+  await chatAction(chatId, "typing");
+  const res = await mainAppFetch(
+    "/api/v1/internal/telegram/link-phone",
+    {
+      method: "POST",
+      headers: { "x-bot-secret": BOT_SECRET, "content-type": "application/json" },
+      body: JSON.stringify({
+        phone,
+        telegramUser: {
+          id: from.id,
+          firstName: from.first_name ?? "",
+          lastName: from.last_name,
+          username: from.username,
+        },
+      }),
+    },
+    20_000
+  );
+  if (!res) return void (await sendMessage(chatId, NET_ERR));
+  const data = await readJson<LinkResponse>(res);
+  if (res.ok && data?.token && data.user) {
+    chatSessions.set(chatId, { token: data.token, user: data.user, tgId: from.id, at: Date.now(), booksCache: null });
+    await sendMessage(chatId, `✅ با شمارهٔ موبایل‌تان وارد شدید! 🎉\nخوش آمدی <b>${esc(from.first_name || data.user.fullName)}</b>!`);
+    const s = chatSessions.get(chatId);
+    if (s) await sendWelcomeLinked(chatId, from, s);
+    log(`کاربر تلگرام ${from.id} با شمارهٔ موبایل متصل شد`);
+    return;
+  }
+  const msg = data?.error?.message || "ورود با شمارهٔ موبایل ناموفق بود.";
+  await sendMessage(
+    chatId,
+    `❌ ${esc(msg)}\n\nمی‌توانید دوباره دکمهٔ «📱 ورود با شمارهٔ موبایل» را بزنید، یا با «کد اتصال ۶ رقمی» از پروفایل نسخهٔ وب وارد شوید. 🔢`,
+    [[{ text: "🔗 اتصال با کد ۶ رقمی", callback_data: "link" }]],
+    linkPhoneReply()
   );
 }
 
@@ -1536,8 +1674,9 @@ async function sendLogoutConfirm(chatId: number, from: TgUser): Promise<void> {
     // حسابی متصل نیست — فقط راهنمایی کوتاه
     return void (await sendMessage(
       chatId,
-      "🚪 حسابی از این تلگرام متصل نیست — نیازی به خروج نیست! ✅\nاگر خواستی وصل شوی، کد ۶ رقمی پروفایل وب را بفرست. 🔢",
-      [[{ text: "🔗 اتصال حساب من", callback_data: "link" }]]
+      "🚪 حسابی از این تلگرام متصل نیست — نیازی به خروج نیست! ✅\nاگر خواستی وصل شوی، دکمهٔ «📱 ورود با شمارهٔ موبایل» را بزن یا کد ۶ رقمی پروفایل وب را بفرست. 🔢",
+      [[{ text: "🔗 اتصال با کد ۶ رقمی", callback_data: "link" }]],
+      linkPhoneReply()
     ));
   }
   await sendMessage(
@@ -1583,8 +1722,9 @@ async function doLogout(chatId: number, from: TgUser, cbId?: string): Promise<vo
   log(`کاربر تلگرام ${from.id} از حساب خود قطع شد`);
   await sendMessage(
     chatId,
-    "🚪 <b>اتصال حساب قطع شد.</b>\n\nاز همراهی‌تان سپاسگزاریم! 🙏\nهر وقت خواستید دوباره برگردید، کد اتصال ۶ رقمی را از پروفایل وب بگیرید و همین‌جا بفرستید. 🔢",
-    [[{ text: "🔗 اتصال مجدد", callback_data: "link" }]]
+    "🚪 <b>اتصال حساب قطع شد.</b>\n\nاز همراهی‌تان سپاسگزاریم! 🙏\nهر وقت خواستید برگردید: دکمهٔ «📱 ورود با شمارهٔ موبایل» را بزنید، یا کد اتصال ۶ رقمی را از پروفایل وب بگیرید و همین‌جا بفرستید. 🔢",
+    [[{ text: "🔗 اتصال مجدد", callback_data: "link" }]],
+    linkPhoneReply()
   );
 }
 
@@ -2116,6 +2256,10 @@ async function onMessage(m: TgMessage): Promise<void> {
   // ۰-) سند PDF — آپلود کتاب از خود تلگرام (round 20)
   if (m.document) return void (await onBookDocument(chatId, from, m.document));
 
+  // ۰.۵) اشتراک‌گذاری شمارهٔ موبایل — ورود بدون کد (round 22)
+  // باید قبل از بررسی «متن خالی» باشد: پیام مخاطب، text ندارد.
+  if (m.contact?.phone_number) return void (await tryLinkPhone(chatId, from, m.contact.phone_number));
+
   const text = (m.text ?? "").trim();
   if (!text) {
     await sendMessage(chatId, "💬 فعلاً فقط پیام متنی و فایل PDF (برای افزودن کتاب) را پشتیبانی می‌کنم 🙏");
@@ -2153,6 +2297,15 @@ async function onMessage(m: TgMessage): Promise<void> {
   if (/^\d{6}$/.test(text)) return void (await tryLinkCode(chatId, from, text));
 
   // ۳) برچسب‌های منوی اصلی
+  if (text.includes("ورود با شماره")) {
+    return void (await sendMessage(
+      chatId,
+      "📱 برای ورود با شمارهٔ موبایل، دکمهٔ «📱 ورود با شمارهٔ موبایل» پایین صفحه را بزنید تا شمارهٔ تلگرام‌تان با من به اشتراک گذاشته شود.\nاگر دکمه را نمی‌بینید، /start را بفرستید. 🚀",
+      undefined,
+      linkPhoneReply()
+    ));
+  }
+  if (text.includes("اتصال با کد")) return void (await sendLinkGuide(chatId));
   if (text.includes("کتاب‌خانه") || text.includes("کتاب‌ها") || text.includes("کتابخانه")) {
     return void (await sendBooksList(chatId, from, { fresh: true }));
   }
@@ -2222,6 +2375,18 @@ async function onCallback(cb: TgCallbackQuery): Promise<void> {
     case "orig":
       await answerCb(cb.id);
       return void (await sendOriginalPdf(chatId, from, a));
+    case "quizpdf":
+      // راند ۲۲ — برگهٔ رسمی نمونه‌سؤال به‌صورت PDF
+      await answerCb(cb.id);
+      return void (await sendQuizPdf(chatId, from, a));
+    case "podsave":
+      // راند ۲۲ — ذخیرهٔ پادکست در «پیام‌های ذخیره» خود کاربر (ارسال به from.id)
+      await sendPodcast(from.id, from, a, { forSaved: true });
+      return void (await answerCb(cb.id, "در پیام‌های ذخیره ذخیره شد ✅"));
+    case "origsave":
+      // راند ۲۲ — ذخیرهٔ کتاب اصلی در «پیام‌های ذخیره» خود کاربر
+      await sendOriginalPdf(from.id, from, a, { forSaved: true });
+      return void (await answerCb(cb.id, "در پیام‌های ذخیره ذخیره شد ✅"));
     case "upld":
       return void (await onUploadCallback(cb, chatId, messageId));
     case "quiz":

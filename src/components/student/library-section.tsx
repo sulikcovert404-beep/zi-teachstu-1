@@ -6,19 +6,20 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { EmptyState, ErrorState, LoadingGrid, PageTitle, faNum } from "@/components/shared/blocks";
+import { BookUploadDialog } from "@/components/shared/book-upload-dialog";
 import { cn } from "@/lib/utils";
 import { EDUCATION_LEVELS, gradesForLevel, gradeLabelFa, levelLabel } from "@/lib/education-levels";
 import { subjectsForLevelGrade } from "@/lib/curriculum";
-import { BookOpen, FileDown, Library, Search, Shapes, Sparkles, Trophy } from "lucide-react";
+import { BookOpen, FileDown, Library, Plus, Search, Shapes, Sparkles, Trophy } from "lucide-react";
 import { BookDetailView, type ArtifactStatus, type BookRow } from "./book-detail";
 
-// ── Student Smart Library (Round 16 + 18) ──
-// Browse visible books by the official course structure (دوره → پایه → درس) → open
-// one → AI summary + جزوه + figures + podcast + sample quizzes with points.
+// ── Student Smart Library (Round 16 + 18 + 22) ──
+// Browse visible books by the official course structure (دوره → پایه → درس — چینش
+// چیپی به سبک chap.sch.ir) → open one → AI summary + جزوه + figures + podcast +
+// sample quizzes with points. کاربران دارای مجوز (canUpload) همین‌جا کتاب جدید
+// اضافه می‌کنند (فایل PDF یا لینک دانلود) — راند ۲۲، خواستهٔ مدیر.
 // Grid polls itself while books are generating.
 
 interface BooksListResponse {
@@ -68,6 +69,40 @@ function artifactTone(s: ArtifactStatus): { dot: string; label: string } {
   return { dot: "bg-muted-foreground/40", label: "در صف" };
 }
 
+// ── Round 22 — فیلتر آبشاری چیپی به سبک chap.sch.ir (کتاب‌های درسی ایران) ──
+// دوره → پایه → درس به‌صورت ردیف چیپ‌های لمسی؛ فعال = گرادیان زمردی/فیروزه‌ای،
+// غیرفعال = کانتور ملایم. جایگزین دراپ‌داون‌ها با همان state (fLevel/fGrade/fSubject).
+function FilterChip({
+  active,
+  onClick,
+  children,
+  label,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      aria-label={label}
+      title={label}
+      className={cn(
+        "min-h-9 px-3 rounded-full text-xs font-bold transition-all inline-flex items-center gap-1.5 cursor-pointer",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50 focus-visible:ring-offset-1",
+        active
+          ? "bg-gradient-to-l from-emerald-600 to-teal-600 text-white shadow-sm shadow-emerald-600/25 hover:brightness-110 active:scale-[0.97]"
+          : "border border-border/60 bg-background text-muted-foreground hover:border-emerald-400/50 hover:text-foreground hover:bg-emerald-500/5 active:scale-[0.97]"
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
 function ArtifactPill({ emoji, label, status }: { emoji: string; label: string; status: ArtifactStatus }) {
   const tone = artifactTone(status);
   return (
@@ -99,6 +134,8 @@ export function LibrarySection({ onGo }: { onGo?: (section: string) => void }) {
   const [reloadKey, setReloadKey] = useState(0);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  // Round 22 — دیالوگ «افزودن کتاب جدید» (canUpload)
+  const [uploadOpen, setUploadOpen] = useState(false);
   // course-structure filters (round 18)
   const [fLevel, setFLevel] = useState("ALL");
   const [fGrade, setFGrade] = useState("ALL");
@@ -198,16 +235,43 @@ export function LibrarySection({ onGo }: { onGo?: (section: string) => void }) {
         title="کتاب‌خانه هوشمند"
         description="کتاب‌ها را بر اساس دوره، پایه و درس پیدا کن؛ خلاصه، جزوه، پادکست صوتی و نمونه‌سؤال‌ها آمادهٔ استفاده‌اند."
         action={
-          points ? (
-            <Badge
-              className="bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-500/30 text-xs font-bold tabular-nums h-8 px-3 cursor-default"
-              title={`۳۰ روز اخیر: ${faNum(points.last30Days)} امتیاز`}
-            >
-              <span aria-hidden>⭐</span> {faNum(points.total)} امتیاز
-            </Badge>
-          ) : undefined
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Round 22 — «افزودن کتاب جدید» همان‌جا که کتاب‌ها دیده می‌شوند */}
+            {data?.canUpload && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    onClick={() => setUploadOpen(true)}
+                    className="h-9 bg-gradient-to-l from-emerald-600 to-teal-600 text-white hover:brightness-110 active:scale-[0.98] transition-all shadow-md shadow-emerald-600/20"
+                  >
+                    <Plus className="h-4 w-4 ml-1.5" aria-hidden />
+                    افزودن کتاب جدید
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent className="text-[10px] max-w-56 text-right" dir="rtl">
+                  {data.canUploadLabel}
+                </TooltipContent>
+              </Tooltip>
+            )}
+            {points ? (
+              <Badge
+                className="bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-500/30 text-xs font-bold tabular-nums h-8 px-3 cursor-default"
+                title={`۳۰ روز اخیر: ${faNum(points.last30Days)} امتیاز`}
+              >
+                <span aria-hidden>⭐</span> {faNum(points.total)} امتیاز
+              </Badge>
+            ) : undefined}
+          </div>
         }
       />
+
+      {/* مجوز آپلود — راهنمای زیر دکمه وقتی دیالوگ باز است */}
+      {data?.canUpload && uploadOpen && (
+        <p className="text-[10px] text-muted-foreground flex items-center gap-1.5 -mt-2">
+          <Plus className="h-3 w-3 shrink-0" aria-hidden />
+          {data.canUploadLabel}
+        </p>
+      )}
 
       {error && <ErrorState message={error} onRetry={() => setReloadKey((k) => k + 1)} />}
 
@@ -226,64 +290,98 @@ export function LibrarySection({ onGo }: { onGo?: (section: string) => void }) {
                   maxLength={80}
                 />
               </div>
-              {/* course-structure filter — دوره → پایه → درس */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                <div className="space-y-1">
-                  <Label htmlFor="fl-level" className="text-[10px] text-muted-foreground">دورهٔ تحصیلی</Label>
-                  <Select
-                    value={fLevel}
-                    onValueChange={(v) => {
-                      setFLevel(v);
+              {/* ── Round 22 — فیلتر آبشاری چیپی به سبک chap.sch.ir: دوره → پایه → درس ── */}
+              <div className="rounded-xl border border-border/60 bg-muted/20 p-3 space-y-2.5">
+                {/* ردیف ۱ — دورهٔ تحصیلی */}
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-[10px] font-bold text-muted-foreground shrink-0 pl-0.5">
+                    دوره:
+                  </span>
+                  <FilterChip
+                    active={fLevel === "ALL"}
+                    onClick={() => {
+                      setFLevel("ALL");
                       setFGrade("ALL");
                       setFSubject("ALL");
                     }}
+                    label="همهٔ دوره‌ها"
                   >
-                    <SelectTrigger className="h-10 w-full" id="fl-level">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="ALL">همهٔ دوره‌ها</SelectItem>
-                      {EDUCATION_LEVELS.map((l) => (
-                        <SelectItem key={l.code} value={l.code}>{l.emoji} {l.label}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                    همه
+                  </FilterChip>
+                  {EDUCATION_LEVELS.map((l) => (
+                    <FilterChip
+                      key={l.code}
+                      active={fLevel === l.code}
+                      onClick={() => {
+                        setFLevel(l.code);
+                        setFGrade("ALL");
+                        setFSubject("ALL");
+                      }}
+                      label={`دوره ${l.label}`}
+                    >
+                      <span aria-hidden>{l.emoji}</span>
+                      {l.label}
+                    </FilterChip>
+                  ))}
                 </div>
-                <div className="space-y-1">
-                  <Label htmlFor="fl-grade" className="text-[10px] text-muted-foreground">پایه</Label>
-                  <Select
-                    value={fGrade}
-                    disabled={fLevel === "ALL" || gradeOptions.length === 0}
-                    onValueChange={(v) => {
-                      setFGrade(v);
-                      setFSubject("ALL");
-                    }}
-                  >
-                    <SelectTrigger className="h-10 w-full" id="fl-grade">
-                      <SelectValue placeholder={fLevel === "ALL" ? "ابتدا دوره را انتخاب کن" : gradeOptions.length === 0 ? "این دوره پایه ندارد" : "همهٔ پایه‌ها"} />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="ALL">همهٔ پایه‌ها</SelectItem>
-                      {gradeOptions.map((g) => (
-                        <SelectItem key={g} value={g}>{gradeLabelFa(fLevel, g)}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-1">
-                  <Label htmlFor="fl-subject" className="text-[10px] text-muted-foreground">درس</Label>
-                  <Select value={fSubject} onValueChange={setFSubject} disabled={fLevel === "ALL" || subjectOptions.length === 0}>
-                    <SelectTrigger className="h-10 w-full" id="fl-subject">
-                      <SelectValue placeholder={fLevel === "ALL" ? "ابتدا دوره را انتخاب کن" : "همهٔ دروس"} />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="ALL">همهٔ دروس</SelectItem>
-                      {subjectOptions.map((s) => (
-                        <SelectItem key={s} value={s}>{s}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
+
+                {/* ردیف ۲ — پایه (بعد از انتخاب دوره؛ پیش‌دبستانی پایه ندارد) */}
+                {fLevel !== "ALL" && gradeOptions.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5 pt-2.5 border-t border-border/50">
+                    <span className="text-[10px] font-bold text-muted-foreground shrink-0 pl-0.5">
+                      {fLevel === "PRIMARY" ? "کلاس:" : "پایه:"}
+                    </span>
+                    <FilterChip
+                      active={fGrade === "ALL"}
+                      onClick={() => {
+                        setFGrade("ALL");
+                        setFSubject("ALL");
+                      }}
+                      label="همهٔ پایه‌ها"
+                    >
+                      همهٔ پایه‌ها
+                    </FilterChip>
+                    {gradeOptions.map((g) => (
+                      <FilterChip
+                        key={g}
+                        active={fGrade === g}
+                        onClick={() => {
+                          setFGrade(g);
+                          setFSubject("ALL");
+                        }}
+                        label={gradeLabelFa(fLevel, g)}
+                      >
+                        {gradeLabelFa(fLevel, g)}
+                      </FilterChip>
+                    ))}
+                  </div>
+                )}
+
+                {/* ردیف ۳ — درس (بعد از انتخاب پایه؛ پیش‌دبستانی مستقیم درس دارد) */}
+                {fLevel !== "ALL" && subjectOptions.length > 0 && (fGrade !== "ALL" || gradeOptions.length === 0) && (
+                  <div className="flex flex-wrap items-center gap-1.5 pt-2.5 border-t border-border/50">
+                    <span className="text-[10px] font-bold text-muted-foreground shrink-0 pl-0.5">
+                      درس:
+                    </span>
+                    <FilterChip
+                      active={fSubject === "ALL"}
+                      onClick={() => setFSubject("ALL")}
+                      label="همهٔ درس‌ها"
+                    >
+                      همهٔ دروس
+                    </FilterChip>
+                    {subjectOptions.map((s) => (
+                      <FilterChip
+                        key={s}
+                        active={fSubject === s}
+                        onClick={() => setFSubject(s)}
+                        label={`درس ${s}`}
+                      >
+                        {s}
+                      </FilterChip>
+                    ))}
+                  </div>
+                )}
               </div>
               {hasFilters && (
                 <div className="flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
@@ -448,6 +546,15 @@ export function LibrarySection({ onGo }: { onGo?: (section: string) => void }) {
                 void refreshPoints();
                 void refreshSilent();
               }}
+            />
+          )}
+
+          {/* Round 22 — دیالوگ افزودن کتاب جدید (روی فراخوانی onCreated کل فهرست تازه می‌شود) */}
+          {data.canUpload && (
+            <BookUploadDialog
+              open={uploadOpen}
+              onOpenChange={setUploadOpen}
+              onCreated={() => setReloadKey((k) => k + 1)}
             />
           )}
         </>

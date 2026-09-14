@@ -22,7 +22,7 @@ import { gradeLabelFa } from "@/lib/education-levels";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 import {
-  ArrowRight, BookOpen, Check, Download, Eye, Headphones, Loader2, NotebookPen,
+  ArrowRight, BookOpen, Check, Download, Eye, FileDown, Headphones, Loader2, NotebookPen,
   Printer, RefreshCw, Shapes, Sparkles, Trophy, X,
 } from "lucide-react";
 
@@ -270,6 +270,10 @@ export function BookDetailView({
   // artifacts
   const [docxBusy, setDocxBusy] = useState(false);
   const [notesDocxBusy, setNotesDocxBusy] = useState(false);
+  // Round 22 — خروجی PDF فارسی (فونت وزیرمتن) برای خلاصه/جزوه/نمونه‌سؤال
+  const [summaryPdfBusy, setSummaryPdfBusy] = useState(false);
+  const [notesPdfBusy, setNotesPdfBusy] = useState(false);
+  const [quizPdfBusy, setQuizPdfBusy] = useState<Record<string, boolean>>({});
   const [originalPdfBusy, setOriginalPdfBusy] = useState(false);
   const [printOpen, setPrintOpen] = useState(false);
   const [podcastLoading, setPodcastLoading] = useState(false);
@@ -338,19 +342,24 @@ export function BookDetailView({
   }, [book.id]);
 
   // ── artifacts ──
+  // تبدیل بلاب به دانلود مرورگر (لینک موقت object-URL)
+  function saveBlob(blob: Blob, filename: string, fallback: string) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename || fallback;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  }
+
   // Round 20 — دانلود نسخهٔ اصلی کتاب (PDF بارگذاری‌شده مدیر/معلم یا دریافت‌شده از لینک)
   async function downloadOriginalPdf() {
     setOriginalPdfBusy(true);
     try {
       const { blob, filename } = await fetchBlob(`/api/v1/books/${book.id}/original.pdf`);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = filename || `${book.title.slice(0, 40)}.pdf`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      saveBlob(blob, filename, `${book.title.slice(0, 40)}.pdf`);
       toast({ title: "نسخهٔ اصلی کتاب دانلود شد", description: `«${filename}» — خود کتاب PDF.` });
     } catch (e) {
       toast({
@@ -368,14 +377,7 @@ export function BookDetailView({
     setDocxBusy(true);
     try {
       const { blob, filename } = await fetchBlob(`/api/v1/books/${book.id}/summary.docx`);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = filename || "summary.docx";
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      saveBlob(blob, filename, "summary.docx");
       toast({ title: "فایل Word دانلود شد", description: `«${filename}» — خلاصهٔ کامل کتاب با قالب فارسی.` });
     } catch (e) {
       toast({
@@ -388,19 +390,31 @@ export function BookDetailView({
     }
   }
 
+  // Round 22 — خلاصهٔ PDF با فونت فارسی وزیرمتن (درخواست مدیر: «حتماً خروجی PDF با فونت مناسب فارسی»)
+  async function downloadSummaryPdf() {
+    if (!detail) return;
+    setSummaryPdfBusy(true);
+    try {
+      const { blob, filename } = await fetchBlob(`/api/v1/books/${book.id}/summary.pdf`);
+      saveBlob(blob, filename, `خلاصه-${book.title.slice(0, 40)}.pdf`);
+      toast({ title: "خلاصهٔ PDF دانلود شد", description: `«${filename}» — با فونت فارسی وزیرمتن، آمادهٔ چاپ.` });
+    } catch (e) {
+      toast({
+        title: "دانلود PDF ناموفق بود",
+        description: e instanceof ApiClientError ? e.message : undefined,
+        variant: "destructive",
+      });
+    } finally {
+      setSummaryPdfBusy(false);
+    }
+  }
+
   async function downloadNotesDocx() {
     if (!detail) return;
     setNotesDocxBusy(true);
     try {
       const { blob, filename } = await fetchBlob(`/api/v1/books/${book.id}/notes.docx`);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = filename || "jozve.docx";
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      saveBlob(blob, filename, "jozve.docx");
       toast({ title: "جزوهٔ Word دانلود شد", description: `«${filename}» — جزوهٔ شبامتحان با قالب فارسی.` });
     } catch (e) {
       toast({
@@ -410,6 +424,46 @@ export function BookDetailView({
       });
     } finally {
       setNotesDocxBusy(false);
+    }
+  }
+
+  // Round 22 — جزوهٔ PDF با فونت فارسی وزیرمتن
+  async function downloadNotesPdf() {
+    if (!detail) return;
+    setNotesPdfBusy(true);
+    try {
+      const { blob, filename } = await fetchBlob(`/api/v1/books/${book.id}/notes.pdf`);
+      saveBlob(blob, filename, `جزوه-${book.title.slice(0, 40)}.pdf`);
+      toast({ title: "جزوهٔ PDF دانلود شد", description: `«${filename}» — با فونت فارسی وزیرمتن، آمادهٔ چاپ.` });
+    } catch (e) {
+      toast({
+        title: "دانلود جزوهٔ PDF ناموفق بود",
+        description: e instanceof ApiClientError ? e.message : undefined,
+        variant: "destructive",
+      });
+    } finally {
+      setNotesPdfBusy(false);
+    }
+  }
+
+  // Round 22 — نمونه‌سؤال PDF با چارچوب رسمی برگهٔ آزمون + پاسخ‌نامهٔ تشریحی
+  async function downloadQuizPdf(model: string) {
+    setQuizPdfBusy((prev) => ({ ...prev, [model]: true }));
+    try {
+      const { blob, filename } = await fetchBlob(`/api/v1/books/${book.id}/quiz.pdf?model=${model}`);
+      saveBlob(blob, filename, `نمونه‌سوال-${book.title.slice(0, 40)}.pdf`);
+      toast({
+        title: "نمونه‌سؤال PDF دانلود شد",
+        description: `«${filename}» — برگهٔ رسمی آزمون + پاسخ‌نامهٔ تشریحی.`,
+      });
+    } catch (e) {
+      toast({
+        title: "دانلود نمونه‌سؤال PDF ناموفق بود",
+        description: e instanceof ApiClientError ? e.message : undefined,
+        variant: "destructive",
+      });
+    } finally {
+      setQuizPdfBusy((prev) => ({ ...prev, [model]: false }));
     }
   }
 
@@ -608,17 +662,31 @@ export function BookDetailView({
                     <CardContent className="space-y-4">
                       <MarkdownSummary text={detail.summary} />
                       <div className="flex items-center gap-2 flex-wrap pt-2 border-t border-border/60">
-                        <Button size="sm" variant="outline" onClick={() => void downloadDocx()} disabled={docxBusy}>
+                        {/* Round 22 — خروجی PDF فارسی (وزیرمتن) به‌عنوان گزینهٔ اصلی */}
+                        <Button
+                          size="sm"
+                          onClick={() => void downloadSummaryPdf()}
+                          disabled={summaryPdfBusy}
+                          className="bg-gradient-to-l from-emerald-600 to-teal-600 text-white hover:brightness-110 active:scale-[0.98] transition-all"
+                        >
+                          {summaryPdfBusy ? (
+                            <Loader2 className="h-4 w-4 animate-spin ml-1.5" aria-hidden />
+                          ) : (
+                            <FileDown className="h-4 w-4 ml-1.5" aria-hidden />
+                          )}
+                          دانلود PDF
+                        </Button>
+                        <Button size="sm" variant="outline" onClick={() => void downloadDocx()} disabled={docxBusy} title="خلاصه در قالب Word">
                           {docxBusy ? (
                             <Loader2 className="h-4 w-4 animate-spin ml-1.5" aria-hidden />
                           ) : (
                             <Download className="h-4 w-4 ml-1.5" aria-hidden />
                           )}
-                          دانلود Word
+                          Word
                         </Button>
-                        <Button size="sm" variant="outline" onClick={() => setPrintOpen(true)}>
+                        <Button size="sm" variant="ghost" onClick={() => setPrintOpen(true)}>
                           <Printer className="h-4 w-4 ml-1.5" aria-hidden />
-                          دریافت PDF (چاپ)
+                          چاپ
                         </Button>
                       </div>
                     </CardContent>
@@ -657,13 +725,33 @@ export function BookDetailView({
                     <CardContent className="space-y-4">
                       <MarkdownSummary text={detail.studyNotes} />
                       <div className="flex items-center gap-2 flex-wrap pt-2 border-t border-border/60">
-                        <Button size="sm" variant="outline" onClick={() => void downloadNotesDocx()} disabled={notesDocxBusy}>
+                        {/* Round 22 — جزوه PDF فارسی (وزیرمتن) گزینهٔ اصلی */}
+                        <Button
+                          size="sm"
+                          onClick={() => void downloadNotesPdf()}
+                          disabled={notesPdfBusy}
+                          className="bg-gradient-to-l from-emerald-600 to-teal-600 text-white hover:brightness-110 active:scale-[0.98] transition-all"
+                        >
+                          {notesPdfBusy ? (
+                            <Loader2 className="h-4 w-4 animate-spin ml-1.5" aria-hidden />
+                          ) : (
+                            <FileDown className="h-4 w-4 ml-1.5" aria-hidden />
+                          )}
+                          دانلود PDF
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => void downloadNotesDocx()}
+                          disabled={notesDocxBusy}
+                          title="جزوه در قالب Word"
+                        >
                           {notesDocxBusy ? (
                             <Loader2 className="h-4 w-4 animate-spin ml-1.5" aria-hidden />
                           ) : (
                             <Download className="h-4 w-4 ml-1.5" aria-hidden />
                           )}
-                          دانلود جزوه (Word)
+                          Word
                         </Button>
                       </div>
                     </CardContent>
@@ -792,12 +880,13 @@ export function BookDetailView({
                 {detail.quizStatus === "READY" && quizMode === "idle" && (
                   <Card className="border-border/60">
                     <CardHeader className="pb-3">
-                      <CardTitle className="text-sm flex items-center gap-2">
+                      <CardTitle className="text-sm flex items-center gap-2 flex-wrap">
                         <Sparkles className="h-4 w-4 text-teal-600" aria-hidden />
                         نمونه‌سؤال‌های هوشمند
+                        <Badge variant="secondary" className="text-[9px]">برگهٔ PDF رسمی + پاسخ‌نامه</Badge>
                       </CardTitle>
                       <CardDescription>
-                        مدلی را انتخاب کن، به سؤال‌ها پاسخ بده و با بهبود رکوردتان امتیاز بگیر.
+                        مدلی را انتخاب کن، به سؤال‌ها پاسخ بده و با بهبود رکوردتان امتیاز بگیر؛ با «PDF» همان مدل را به‌صورت برگهٔ رسمی آزمون دانلود کن.
                       </CardDescription>
                     </CardHeader>
                     <CardContent>
@@ -810,23 +899,51 @@ export function BookDetailView({
                           .concat(quizCount("fb") > 0 ? [{ value: "FB", label: "جای خالی", count: quizCount("fb") }] : [])
                           .concat(quizCount("short") > 0 ? [{ value: "SHORT", label: "تشریحی کوتاه", count: quizCount("short") }] : [])
                           .map((m) => (
-                            <button
+                            <div
                               key={m.value}
-                              type="button"
-                              disabled={m.count === 0 || quizLoading}
-                              onClick={() => void startQuiz(m.value)}
                               className={cn(
-                                "rounded-xl border p-3 text-center transition-all min-h-11",
-                                m.count === 0
-                                  ? "border-border/50 bg-muted/30 text-muted-foreground/60 cursor-not-allowed"
-                                  : "border-border/60 hover:border-teal-500/50 hover:bg-teal-500/5 active:scale-[0.98] cursor-pointer"
+                                "rounded-xl border overflow-hidden flex flex-col transition-all",
+                                m.count === 0 ? "border-border/50 bg-muted/30" : "border-border/60 hover:border-teal-500/50"
                               )}
                             >
-                              <p className="text-xs font-bold">{m.label}</p>
-                              <p className="text-[10px] text-muted-foreground tabular-nums mt-1">
-                                {m.count === 0 ? "بدون سؤال" : `${faNum(m.count)} سؤال`}
-                              </p>
-                            </button>
+                              <button
+                                type="button"
+                                disabled={m.count === 0 || quizLoading}
+                                onClick={() => void startQuiz(m.value)}
+                                className={cn(
+                                  "p-3 text-center transition-all min-h-11 flex-1",
+                                  m.count === 0
+                                    ? "text-muted-foreground/60 cursor-not-allowed"
+                                    : "hover:bg-teal-500/5 active:scale-[0.98] cursor-pointer"
+                                )}
+                              >
+                                <p className="text-xs font-bold">{m.label}</p>
+                                <p className="text-[10px] text-muted-foreground tabular-nums mt-1">
+                                  {m.count === 0 ? "بدون سؤال" : `${faNum(m.count)} سؤال`}
+                                </p>
+                              </button>
+                              {/* Round 22 — دانلود همان مدل به‌صورت برگهٔ رسمی PDF + پاسخ‌نامه */}
+                              <button
+                                type="button"
+                                disabled={m.count === 0 || quizPdfBusy[m.value]}
+                                onClick={() => void downloadQuizPdf(m.value)}
+                                aria-label={`دانلود نمونه‌سؤال ${m.label} به‌صورت PDF`}
+                                title="دانلود نمونه‌سؤال (PDF) — برگهٔ رسمی آزمون + پاسخ‌نامه"
+                                className={cn(
+                                  "border-t border-border/60 py-2 min-h-9 text-[10px] font-bold inline-flex items-center justify-center gap-1 transition-colors",
+                                  m.count === 0 || quizPdfBusy[m.value]
+                                    ? "text-muted-foreground/50 cursor-not-allowed"
+                                    : "text-teal-700 dark:text-teal-400 hover:bg-teal-500/10 active:scale-[0.98] cursor-pointer"
+                                )}
+                              >
+                                {quizPdfBusy[m.value] ? (
+                                  <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                                ) : (
+                                  <FileDown className="h-3.5 w-3.5" aria-hidden />
+                                )}
+                                PDF
+                              </button>
+                            </div>
                           ))}
                       </div>
                     </CardContent>

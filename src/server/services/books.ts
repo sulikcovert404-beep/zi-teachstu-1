@@ -11,6 +11,7 @@ import { requireFeature } from "./plan";
 import { awardPoints, POINT_REASONS } from "./points";
 import { audit } from "./audit";
 import { attachOriginalPdf } from "./pdf-extract";
+import { renderDocPdf, renderQuizPdf } from "./pdf-export";
 import { isLevelCode, levelLabel, isValidGradeForLevel } from "@/lib/education-levels";
 import type { AuthContext } from "@/server/auth/session";
 
@@ -1278,4 +1279,83 @@ export async function bookStudyNotesDocx(ctx: AuthContext, bookId: string) {
   });
   const safeTitle = book.title.replace(/[\\/:*?"<>|]/g, "_").slice(0, 60);
   return { docx, filename: `jozve-${safeTitle}.docx` };
+}
+
+// ── Round 22 — PDF خروجی فارسی (Chromium + Vazirmatn) ──
+// خواستهٔ مدیر: «حتماً خروجی PDF با فونت مناسب فارسی» و سؤال‌ها با چارچوب رسمی
+// برگهٔ آزمون. هر سه سند با همان موتور رندر وب ساخته می‌شوند تا شکل‌دهی حروف
+// فارسی بی‌نقص باشد؛ فونت وزیرمتن داخل فایل جاسازی می‌شود.
+
+function pdfMetaBits(book: { subject: string | null; gradeLevel: string | null; level: string | null; author: string | null }): string[] {
+  const bits = [
+    book.level ? levelLabel(book.level) : null,
+    book.gradeLevel ? `پایهٔ ${book.gradeLevel}` : null,
+    book.subject ? `درس: ${book.subject}` : null,
+    book.author ? `نویسنده: ${book.author}` : null,
+  ].filter(Boolean) as string[];
+  return bits;
+}
+
+export async function bookSummaryPdf(ctx: AuthContext, bookId: string) {
+  const book = await visibleBook(ctx, bookId);
+  if (book.summaryStatus !== "READY" || !book.summary) {
+    throw Errors.validation("خلاصهٔ این کتاب هنوز تولید نشده است.");
+  }
+  const pdf = await renderDocPdf({
+    title: book.title,
+    kind: "خلاصهٔ هوشمند کتاب",
+    metaBits: pdfMetaBits(book),
+    markdown: book.summary,
+    footerNote: "خلاصهٔ هوشمند کتاب",
+    intro: "این خلاصه به‌صورت خودکار از متن کامل کتاب تولید شده است — برای مرور سریع پیش از آزمون مناسب است.",
+  });
+  const safeTitle = book.title.replace(/[\\/:*?"<>|]/g, "_").slice(0, 60);
+  return { pdf, filename: `summary-${safeTitle}.pdf` };
+}
+
+export async function bookStudyNotesPdf(ctx: AuthContext, bookId: string) {
+  const book = await visibleBook(ctx, bookId);
+  if (book.studyNotesStatus !== "READY" || !book.studyNotes) {
+    throw Errors.validation("جزوهٔ این کتاب هنوز تولید نشده است.");
+  }
+  const pdf = await renderDocPdf({
+    title: `جزوهٔ ${book.title}`,
+    kind: "جزوهٔ درسی هوشمند",
+    metaBits: pdfMetaBits(book),
+    markdown: book.studyNotes,
+    footerNote: "جزوهٔ درسی هوشمند",
+    intro: "جزوهٔ ساختاریافته با نکات کلیدی — برای مطالعهٔ هدفمند و مرور فصل‌به‌فصل آماده شده است.",
+  });
+  const safeTitle = book.title.replace(/[\\/:*?"<>|]/g, "_").slice(0, 60);
+  return { pdf, filename: `jozve-${safeTitle}.pdf` };
+}
+
+export async function bookQuizPdf(ctx: AuthContext, bookId: string, model: string) {
+  const book = await visibleBook(ctx, bookId);
+  if (book.quizStatus !== "READY" || !book.quiz) {
+    throw Errors.validation("نمونه‌سؤال‌های این کتاب هنوز آماده نشده است.");
+  }
+  const quizModel = (QUIZ_MODELS as readonly string[]).includes(model) ? (model as QuizModel) : "MC";
+  const items = quizItemsForModel(parseQuiz(book.quiz), quizModel);
+  if (items.length === 0) throw Errors.validation("این مدل سؤال برای کتاب موجود نیست.");
+
+  const pdf = await renderQuizPdf({
+    title: `نمونه‌سؤال — ${book.title}`,
+    metaBits: pdfMetaBits(book),
+    modelLabel: quizModelLabel(quizModel),
+    questions: items.map((it) => ({
+      kind: it.kind,
+      prompt: it.prompt,
+      options: it.options,
+      correctIndex: it.correctIndex,
+      correct: it.correct,
+      answer: it.answer,
+      referenceAnswer: it.referenceAnswer,
+      explanation: it.explanation,
+      topic: it.topic,
+    })),
+    footerNote: "نمونه‌سؤال هوشمند",
+  });
+  const safeTitle = book.title.replace(/[\\/:*?"<>|]/g, "_").slice(0, 60);
+  return { pdf, filename: `quiz-${quizModel.toLowerCase()}-${safeTitle}.pdf` };
 }

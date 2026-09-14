@@ -33,6 +33,7 @@ export function publicUser(user: {
   email: string | null;
   tenantId: string | null;
   grade: string | null;
+  phone?: string | null;
 }) {
   return {
     id: user.id,
@@ -42,6 +43,7 @@ export function publicUser(user: {
     email: user.email,
     tenantId: user.tenantId,
     grade: user.grade,
+    phone: user.phone ?? null,
     dashboard: ROLE_DASHBOARD_PATHS[user.role as Role] ?? "/mini-app/",
   };
 }
@@ -50,6 +52,26 @@ export async function logout(ctx: AuthContext) {
   await revokeSession(ctx.sessionTokenHash);
   await audit({ actorId: ctx.userId, tenantId: ctx.tenantId, action: "logout" });
   return { loggedOut: true };
+}
+
+// ── Round 22 — ثبت شمارهٔ موبایل برای ورود خودکار تلگرام ──
+// کاربر در وب شماره‌اش را ثبت می‌کند؛ بعد وقتی همان شماره را از تلگرام به اشتراک
+// بگذارد (بات یا مینی‌اپ)، بدون نیاز به کد اتصال وارد همان حساب می‌شود.
+export async function updateMyPhone(ctx: AuthContext, rawPhone: string) {
+  const { normalizePhone } = await import("./telegram-signup");
+  let phone: string;
+  try {
+    phone = normalizePhone(rawPhone);
+  } catch {
+    throw Errors.validation("شمارهٔ موبایل معتبر نیست (مثال: ۰۹۱۲۳۴۵۶۷۸۹).");
+  }
+  const other = await db.user.findFirst({ where: { phone, id: { not: ctx.userId } }, select: { id: true } });
+  if (other) {
+    throw Errors.conflict("PHONE_TAKEN", "این شمارهٔ موبایل قبلاً برای حساب دیگری ثبت شده است.");
+  }
+  await db.user.update({ where: { id: ctx.userId }, data: { phone } });
+  await audit({ actorId: ctx.userId, tenantId: ctx.tenantId, action: "admin_action", metadata: { phoneSaved: true } });
+  return { phone };
 }
 
 export async function me(ctx: AuthContext) {

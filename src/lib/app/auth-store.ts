@@ -20,6 +20,7 @@ export interface Me {
     effectiveRoleLabel: string;
     fullName: string;
     email: string | null;
+    phone?: string | null; // Round 22 — شمارهٔ موبایل برای ورود خودکار تلگرام
     tenantId: string | null;
     grade: string | null;
     dashboard: string;
@@ -41,6 +42,9 @@ interface AuthStore {
   telegramLink: TelegramLinkState;
   bootstrap: () => Promise<void>;
   login: (email: string, password: string) => Promise<void>;
+  // Round 22 — adopt a server-issued token from the phone-based Telegram login
+  // flow (/api/v1/auth/telegram/link-phone): same adoption path as `login`.
+  loginWithToken: (token: string) => Promise<void>;
   logout: (opts?: { unlinkTelegram?: boolean }) => Promise<void>;
   refreshMe: () => Promise<void>;
   setPreviewToken: (token: string) => Promise<void>;
@@ -123,6 +127,15 @@ export const useAuth = create<AuthStore>((set, get) => ({
     setToken(res.token);
     const me = await api<Me>("/api/v1/auth/me");
     set({ status: "authenticated", me });
+  },
+
+  // Round 22 — Mini App «ورود با شمارهٔ تلفن»: the link-phone endpoint returns a
+  // fresh session token; mirror `login` so the app auto-transitions to the dashboard.
+  loginWithToken: async (token) => {
+    set({ error: null });
+    setToken(token);
+    const me = await api<Me>("/api/v1/auth/me");
+    set({ status: "authenticated", me, telegramLink: { required: false, user: null } });
   },
 
   logout: async (opts) => {

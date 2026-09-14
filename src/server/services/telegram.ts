@@ -1,6 +1,6 @@
 import crypto from "crypto";
 import { db } from "@/lib/db";
-import { Errors } from "@/server/core/errors";
+import { ApiError, Errors } from "@/server/core/errors";
 import { audit } from "./audit";
 import { getSettings } from "./settings";
 import { createSession } from "@/server/auth/session";
@@ -294,6 +294,50 @@ export async function linkWithInitData(ctx: AuthContext, initData: string) {
   await linkTelegramToUser(ctx.userId, tUser);
   const settings = await getSettings();
   return { linked: true, telegramUser: tUser, botUsername: settings.telegramBotUsername || null };
+}
+
+// ── Round 22 — ورود با شمارهٔ موبایل ──
+// خواستهٔ مدیر: «اگر طرف توی وب شماره‌اش را گذاشته باشد و شمارهٔ تلگرامش همان
+// بود، خودش وارد اکانتش شود». کاربر شماره‌اش را از تلگرام به اشتراک می‌گذارد
+// (request_contact / WebApp.requestContact) — تلگرام خودش مالکیت شماره را تأیید
+// کرده است؛ اگر کاربر فعالی با همین شمارهٔ نرمال‌شده وجود داشته باشد، هویت
+// تلگرام به همان حساب وصل می‌شود و نشست صادر می‌گردد (بدون نیاز به کد اتصال).
+export async function linkTelegramByPhone(phone: string, tUser: TelegramUser): Promise<LinkResult> {
+  const { normalizePhone } = await import("./telegram-signup");
+  let normalized: string;
+  try {
+    normalized = normalizePhone(phone);
+  } catch {
+    throw Errors.validation("شمارهٔ موبایل به اشتراک گذاشته‌شده معتبر نیست.");
+  }
+
+  const user = await db.user.findFirst({ where: { phone: normalized } });
+  if (!user) {
+    throw new ApiError(
+      "NOT_FOUND",
+      "حسابی با این شمارهٔ موبایل در پلتفرم پیدا نشد. ابتدا شمارهٔ خود را در پروفایل نسخهٔ وب ثبت کنید یا با «کد اتصال» وارد شوید.",
+      404
+    );
+  }
+  if (user.status !== "ACTIVE") throw Errors.forbidden("حساب کاربری این شماره فعال نیست.");
+
+  // اگر این هویت تلگرام قبلاً به کاربر دیگری وصل بوده، مالکیت شماره (که تلگرام
+  // تأییدش کرده) مالکیت حساب را اثبات می‌کند → پیوند به حساب درست منتقل می‌شود.
+  const existing = await db.externalIdentity.findUnique({
+    where: { provider_externalUserId: { provider: "telegram", externalUserId: String(tUser.id) } },
+  });
+  if (existing && existing.userId !== user.id) {
+    await db.externalIdentity.delete({ where: { id: existing.id } });
+    await audit({
+      actorId: user.id,
+      action: "admin_action",
+      metadata: { telegramRelinkByPhone: true, previousUserId: existing.userId },
+    });
+  }
+
+  await linkTelegramToUser(user.id, tUser);
+  const { token } = await createSession(user.id);
+  return { token, user: { id: user.id, role: user.role, fullName: user.fullName }, telegramUser: tUser };
 }
 
 // Bot-service session resolution: telegram id → linked session. When unlinked, the

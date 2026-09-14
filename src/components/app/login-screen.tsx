@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useAuth } from "@/lib/app/auth-store";
-import { api } from "@/lib/app/api-client";
+import { api, ApiClientError } from "@/lib/app/api-client";
 import { isInTelegram, tgHaptic } from "@/lib/telegram/webapp";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
@@ -32,6 +32,7 @@ import {
   KeyRound,
   Send,
   CheckCircle2,
+  Smartphone,
 } from "lucide-react";
 
 const DEMO_ACCOUNTS = [
@@ -112,6 +113,64 @@ export function LoginScreen() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  // Round 22 — «ورود با شمارهٔ تلفن» داخل مینی‌اپ (WebApp.requestContact → link-phone)
+  const [phoneLoginBusy, setPhoneLoginBusy] = useState(false);
+  const [phoneLoginError, setPhoneLoginError] = useState<string | null>(null);
+
+  // Round 22 — Mini App phone login: user shares their phone number via
+  // WebApp.requestContact → POST /api/v1/auth/telegram/link-phone {initData, phone}.
+  // Server HMAC-verifies initData, matches the phone to an ACTIVE account, links the
+  // telegram identity and returns a session token → loginWithToken adopts it.
+  function requestPhoneLogin() {
+    setPhoneLoginError(null);
+    const wa = (window as any).Telegram?.WebApp;
+    if (typeof wa?.requestContact !== "function") {
+      setPhoneLoginError("نسخهٔ تلگرام شما اشتراک‌گذاری شماره را پشتیبانی نمی‌کند؛ با ایمیل و رمز وارد شوید.");
+      return;
+    }
+    setPhoneLoginBusy(true);
+    try {
+      wa.requestContact(async (shared: boolean, res: any) => {
+        if (!shared) {
+          setPhoneLoginBusy(false);
+          setPhoneLoginError("اشتراک‌گذاری شماره لغو شد — دوباره تلاش کنید یا با ایمیل وارد شوید.");
+          return;
+        }
+        const phone: string | undefined =
+          res?.contact?.phone_number ?? res?.response?.contact?.phone_number ?? undefined;
+        const initData = wa?.initData as string | undefined;
+        if (!phone || !initData) {
+          setPhoneLoginBusy(false);
+          setPhoneLoginError("شمارهٔ تلفن از تلگرام دریافت نشد؛ دوباره تلاش کنید.");
+          return;
+        }
+        try {
+          const r = await api<{ linked: boolean; token?: string; message?: string; reason?: string }>(
+            "/api/v1/auth/telegram/link-phone",
+            { method: "POST", body: JSON.stringify({ initData, phone }), skipAuth: true },
+          );
+          if (r?.linked && r?.token) {
+            tgHaptic("success");
+            // auth store status → authenticated؛ اپ خودکار به داشبورد می‌رود
+            await useAuth.getState().loginWithToken(r.token);
+          } else {
+            setPhoneLoginBusy(false);
+            setPhoneLoginError(
+              r?.message ?? "حسابی با این شمارهٔ موبایل در پلتفرم پیدا نشد؛ ابتدا از تنظیمات حساب، شمارهٔ خود را ثبت کنید.",
+            );
+            tgHaptic("error");
+          }
+        } catch (e) {
+          setPhoneLoginBusy(false);
+          setPhoneLoginError(e instanceof ApiClientError ? e.message : "ورود با شمارهٔ تلفن ناموفق بود.");
+          tgHaptic("error");
+        }
+      });
+    } catch {
+      setPhoneLoginBusy(false);
+      setPhoneLoginError("درخواست شماره از تلگرام ممکن نشد.");
+    }
+  }
 
   // After a successful login inside the Telegram Mini App, link this telegram
   // identity to the freshly-authenticated account (best effort, non-blocking).
@@ -295,9 +354,39 @@ export function LoginScreen() {
                     — مینی‌اپ تلگرام
                   </p>
                   <p className="mt-1 text-xs leading-6 text-muted-foreground">
-                    حساب تلگرام شما هنوز به پلتفرم متصل نیست. همین‌جا با ایمیل و رمز عبور خود وارد شوید؛
-                    پس از ورود، حساب شما <span className="font-bold text-foreground">به‌صورت خودکار به تلگرام متصل می‌شود</span> و دفعهٔ بعد بدون رمز وارد می‌شوید.
+                    حساب تلگرام شما هنوز به پلتفرم متصل نیست. با شمارهٔ تلفن‌تان مستقیم وارد شوید،
+                    یا با ایمیل و رمز عبور خود وارد شوید تا حساب شما
+                    <span className="font-bold text-foreground"> به‌صورت خودکار به تلگرام متصل شود</span> و دفعهٔ بعد بدون رمز وارد شوید.
                   </p>
+
+                  {/* Round 22 — ورود با شمارهٔ تلفن (requestContact → link-phone) */}
+                  <Button
+                    type="button"
+                    onClick={requestPhoneLogin}
+                    disabled={phoneLoginBusy}
+                    className="mt-3 h-11 w-full rounded-xl bg-gradient-to-l from-sky-500 to-cyan-500 text-white shadow-lg shadow-sky-500/25 transition-all hover:brightness-110 active:scale-[0.98]"
+                  >
+                    {phoneLoginBusy ? (
+                      <>
+                        <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                        در حال بررسی شماره…
+                      </>
+                    ) : (
+                      <>
+                        <Smartphone className="h-4 w-4" aria-hidden />
+                        📱 ورود با شمارهٔ تلفن
+                      </>
+                    )}
+                  </Button>
+                  {phoneLoginError && (
+                    <p
+                      role="alert"
+                      className="mt-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs leading-6 text-destructive"
+                    >
+                      {phoneLoginError}
+                    </p>
+                  )}
+
                   <p className="mt-2 flex items-center gap-1.5 text-[11px] text-muted-foreground">
                     <CheckCircle2 className="h-3.5 w-3.5 text-sky-500" aria-hidden />
                     اتصال با امضای امن تلگرام روی سرور تأیید می‌شود.
