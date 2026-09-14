@@ -7,16 +7,20 @@
 // 4. no infinite 401 loop (bounded retries)
 
 export interface ApiErrorShape {
-  error: { code: string; message: string };
+  error: { code: string; message: string; deepLink?: string };
 }
 
 export class ApiClientError extends Error {
   code: string;
   status: number;
-  constructor(code: string, message: string, status: number) {
+  // Round 23 — optional Telegram deep link (t.me/…) carried by oversized-file
+  // errors so the UI can offer «دریافت از تلگرام» alongside the Persian message.
+  deepLink?: string;
+  constructor(code: string, message: string, status: number, deepLink?: string) {
     super(message);
     this.code = code;
     this.status = status;
+    this.deepLink = deepLink;
   }
 }
 
@@ -71,7 +75,8 @@ export async function api<T = unknown>(
     throw new ApiClientError(
       err?.code ?? "NETWORK_ERROR",
       err?.message ?? "ارتباط با سرور برقرار نشد.",
-      res.status
+      res.status,
+      err?.deepLink
     );
   }
   return body as T;

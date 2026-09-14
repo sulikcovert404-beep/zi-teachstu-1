@@ -27,6 +27,9 @@ export interface PlatformSettings {
   telegramBotUsername: string; // cached from getMe
   booksUploadTenants: string[]; // tenant ids where SCHOOL_ADMIN can upload books
   teacherBookUploadTenants: string[]; // tenant ids where TEACHER can upload books/handouts
+  // Round 23 — Telegram-as-Storage (ذخیره‌سازی کامل در تلگرام)
+  telegramStorageEnabled: boolean; // default ON
+  telegramStorageChatId: string; // "" = auto → first linked SUPER_ADMIN telegram chat
 }
 
 export const DEFAULT_SETTINGS: PlatformSettings = {
@@ -38,6 +41,8 @@ export const DEFAULT_SETTINGS: PlatformSettings = {
   telegramBotUsername: "",
   booksUploadTenants: [],
   teacherBookUploadTenants: [],
+  telegramStorageEnabled: true,
+  telegramStorageChatId: "",
 };
 
 const KEYS = {
@@ -49,6 +54,8 @@ const KEYS = {
   telegramBotUsername: "telegram.botUsername",
   booksUploadTenants: "books.uploadTenants",
   teacherBookUploadTenants: "books.teacherUploadTenants",
+  telegramStorageEnabled: "telegram.storageEnabled",
+  telegramStorageChatId: "telegram.storageChatId",
 } as const;
 
 function isGeminiModel(v: unknown): v is GeminiModel {
@@ -73,6 +80,8 @@ export async function getSettings(): Promise<PlatformSettings> {
     telegramBotUsername: g<string>(KEYS.telegramBotUsername, ""),
     booksUploadTenants: g<string[]>(KEYS.booksUploadTenants, []),
     teacherBookUploadTenants: g<string[]>(KEYS.teacherBookUploadTenants, []),
+    telegramStorageEnabled: g<boolean>(KEYS.telegramStorageEnabled, true),
+    telegramStorageChatId: g<string>(KEYS.telegramStorageChatId, ""),
   };
 }
 
@@ -83,6 +92,7 @@ export async function getSettingsForClient(): Promise<
     hasTelegramToken: boolean;
     telegramTokenMasked: string;
     geminiModels: Array<{ code: string; label: string }>;
+    telegramStorage: Awaited<ReturnType<typeof import("./telegram-storage").telegramStorageClientInfo>>;
   }
 > {
   const s = await getSettings();
@@ -92,6 +102,8 @@ export async function getSettingsForClient(): Promise<
     geminiModel: s.geminiModel,
     telegramMiniAppUrl: s.telegramMiniAppUrl,
     telegramBotUsername: s.telegramBotUsername,
+    telegramStorageEnabled: s.telegramStorageEnabled,
+    telegramStorageChatId: s.telegramStorageChatId,
     booksUploadTenants: s.booksUploadTenants,
     teacherBookUploadTenants: s.teacherBookUploadTenants,
     hasGeminiKey: !!s.geminiApiKey,
@@ -99,6 +111,9 @@ export async function getSettingsForClient(): Promise<
     hasTelegramToken: !!s.telegramBotToken,
     telegramTokenMasked: mask(s.telegramBotToken),
     geminiModels: GEMINI_MODELS.map((m) => ({ code: m.code, label: m.label })),
+    telegramStorage: await import("./telegram-storage").then((m) =>
+      m.telegramStorageClientInfo()
+    ),
   };
 }
 
@@ -110,6 +125,8 @@ export interface SettingsUpdateInput {
   telegramMiniAppUrl?: unknown;
   booksUploadTenants?: unknown;
   teacherBookUploadTenants?: unknown;
+  telegramStorageEnabled?: unknown;
+  telegramStorageChatId?: unknown;
 }
 
 function str(v: unknown): string | undefined {
@@ -169,6 +186,20 @@ export async function updateSettings(ctx: AuthContext, input: SettingsUpdateInpu
 
   const teacherTenants = idArray(input.teacherBookUploadTenants);
   if (teacherTenants !== undefined) patch.teacherBookUploadTenants = toJson(teacherTenants);
+
+  // Round 23 — Telegram-as-Storage toggles
+  if (input.telegramStorageEnabled !== undefined) {
+    patch.telegramStorageEnabled = toJson(Boolean(input.telegramStorageEnabled));
+  }
+  const storageChat = str(input.telegramStorageChatId);
+  if (storageChat !== undefined) {
+    if (storageChat !== "" && !/^(-?\d{3,}|@[A-Za-z0-9_]{4,})$/.test(storageChat)) {
+      throw Errors.validation(
+        "شناسهٔ چت ذخیره‌سازی باید عددی باشد (مثلاً ۵۳۸۱۱۲۴۹۹۶) یا نام کانال عمومی مثل @my_storage_channel."
+      );
+    }
+    patch.telegramStorageChatId = toJson(storageChat);
+  }
 
   if (Object.keys(patch).length > 0) {
     await db.$transaction(

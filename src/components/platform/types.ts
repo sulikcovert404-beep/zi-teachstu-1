@@ -97,7 +97,68 @@ export interface PreviewStartResponse {
   previewTenantId: string | null;
 }
 
+// ── Round 23 — «ذخیره‌سازی کامل در تلگرام» ──
+
+// Rich status block served inside GET /platform/settings → settings.telegramStorage.
+export interface TelegramStorageBlock {
+  enabled: boolean;
+  configured: boolean;
+  storageChatId: string; // resolved chat id (explicit or auto from مدیر کل)
+  explicitChatId: string; // raw saved value ("" = auto)
+  assets: number;
+  bytes: number;
+  botUsername: string | null;
+  uploadLimitMb: number;
+  proxyLimitMb: number;
+}
+
+export interface MigratedAsset {
+  kind: string;
+  label: string;
+  sizeBytes: number;
+}
+
+export interface SkippedAsset {
+  kind: string;
+  label: string;
+  reason: string;
+}
+
+// POST /api/v1/books/{bookId}/migrate-storage response body.
+export interface MigrateStorageResponse {
+  ok: boolean;
+  bookId: string;
+  title: string;
+  migrated: MigratedAsset[];
+  skipped: SkippedAsset[];
+  storage: { chatId: string; assets: number; bytes: number };
+}
+
 // ── Persian label helpers (UI display only) ──
+
+// Converts western digits inside any string to Persian digits (۰۱۲۳۴۵۶۷۸۹).
+export function faDigits(value: string | number): string {
+  return String(value).replace(/\d/g, (d) => "۰۱۲۳۴۵۶۷۸۹"[Number(d)]);
+}
+
+function faNumLocal(n: number): string {
+  return new Intl.NumberFormat("fa-IR").format(n);
+}
+
+// Persian human-readable size: بایت / کیلوبایت / مگابایت / گیگابایت.
+export function faSizeBytes(bytes: number | null | undefined): string {
+  if (bytes === null || bytes === undefined || bytes < 0) return "—";
+  if (bytes < 1024) return `${faNumLocal(bytes)} بایت`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${faNumLocal(Math.round(kb))} کیلوبایت`;
+  const mb = bytes / (1024 * 1024);
+  if (mb < 1024) {
+    const shown = mb >= 10 ? Math.round(mb) : Math.round(mb * 10) / 10;
+    return `${faNumLocal(shown)} مگابایت`;
+  }
+  const gb = bytes / (1024 * 1024 * 1024);
+  return `${faNumLocal(Math.round(gb * 10) / 10)} گیگابایت`;
+}
 
 export function tenantStatusFa(status: string): string {
   switch (status) {

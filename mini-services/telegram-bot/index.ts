@@ -15,6 +15,10 @@
  *     و برای هر چت یک session token کش می‌شود که برای فراخوانی‌های Bearer به‌کار می‌رود.
  *   • کتاب‌خانه/خلاصه (متن + PDF فارسی)/پادکست (WAV)/آزمون تعاملی/امتیازها — همه از
  *     همان API عمومی نسخهٔ وب (/api/v1/books، /api/v1/me/points، …).
+ *   • راند ۲۳ — ذخیره‌سازی کامل در تلگرام: فایل‌های هر کتاب یک‌بار در چت ذخیره‌سازی
+ *     آپلود می‌شوند و file_id دائمی‌شان در جزئیات کتاب (telegramFiles) می‌آید؛ بات
+ *     در صورت وجود file_id همان را مستقیم ارسال می‌کند (فوری، بدون دریافت بایت‌ها)
+ *     و فقط در نبودش به مسیر بایت‌های اپ برمی‌گردد.
  *
  *  قواعد:
  *   • توکن بات و توکن نشست‌ها هرگز لاگ نمی‌شوند.
@@ -169,6 +173,9 @@ interface BookDetail extends BookSummary {
   quizModels: { kind: string; label: string; count: number }[];
   errorReason: string | null;
   myAttempts: { id: string; quizModel: string; score: number; maxScore: number; pointsAwarded: number; createdAt: string }[];
+  /** راند ۲۳ — ذخیره‌سازی کامل در تلگرام: file_id های دائمی به‌تفکیک نوع
+   *  (ORIGINAL_PDF / PODCAST_AUDIO / SUMMARY_PDF / NOTES_PDF / QUIZ_PDF_MC و مدل‌های تنبل آزمون) */
+  telegramFiles?: Record<string, string>;
 }
 
 interface BooksListData {
@@ -621,6 +628,17 @@ function fileNameFromResponse(res: Response | null | undefined, fallback: string
   return fname || fallback;
 }
 
+/**
+ * راند ۲۳ — «ذخیره‌سازی کامل در تلگرام»: فایل‌های کتاب (PDF اصلی، پادکست، خلاصه،
+ * جزوه، نمونه‌سؤال) یک‌بار در چت ذخیره‌سازی آپلود شده‌اند و file_id دائمی‌شان در
+ * جزئیات کتاب (telegramFiles) می‌آید. با file_id ارسال «فوری» است — بدون دریافت
+ * بایت‌ها از اپ و بدون آپلود مالتی‌پارت (مهلت پیش‌فرض ۳۰ث کافی است).
+ */
+function tgFileId(b: BookDetail | null | undefined, kind: string): string | null {
+  const fid = b?.telegramFiles?.[kind];
+  return typeof fid === "string" && fid.length > 0 ? fid : null;
+}
+
 /** resolve نشست کاربر تلگرام از اپ اصلی (server-to-server با X-Bot-Secret) */
 async function resolveSession(
   tgId: number
@@ -993,6 +1011,10 @@ async function sendBookCard(
         : statusFa(b.podcastStatus)
     }`
   );
+  // راند ۲۳ — ذخیره‌سازی کامل در تلگرام: اگر فایل‌های کتاب داخل تلگرام نگهداری می‌شوند
+  if (b.telegramFiles && Object.keys(b.telegramFiles).length > 0) {
+    lines.push(`☁️ ${esc("ذخیره‌سازی: تلگرام")}`);
+  }
   const best = bestAttempt(b.myAttempts);
   if (best) {
     lines.push("", `🏆 بهترین رکورد شما: ${faNum(best.score)} از ${faNum(best.maxScore)} (${faNum(b.myAttempts.length)} تلاش)`);
@@ -1059,6 +1081,18 @@ async function sendDocx(chatId: number, from: TgUser, bookId: string): Promise<v
   if (!b || b.summaryStatus !== "READY") {
     return void (await sendMessage(chatId, "📄 خلاصهٔ این کتاب هنوز آماده نشده است."));
   }
+  // راند ۲۳ — مسیر فوری: PDF خلاصه از قبل در تلگرام ذخیره شده → ارسال مستقیم با file_id دائمی
+  // (نام فایل فارسی همان نام ذخیره‌شده در تلگرام است؛ file_name در ارسال file_id نادیده گرفته می‌شود)
+  const tgFid = tgFileId(b, "SUMMARY_PDF");
+  if (tgFid) {
+    const sent = await safeTg<TgMessage>("sendDocument", {
+      chat_id: chatId,
+      document: tgFid,
+      caption: `📄 خلاصهٔ هوشمند کتاب «${trunc(b.title, 80)}» — PDF با فونت فارسی (وزیرمتن)`,
+    });
+    if (sent) return;
+    // ارسال file_id ناموفق بود → ادامه با مسیر بایت‌های زیر (fallback)
+  }
   // راند ۲۲ — خلاصه به‌صورت PDF فارسی (فونت وزیرمتن جاسازی‌شده؛ Chromium سمت سرور → مهلت بلند)
   const res = await authed(chatId, from, `/api/v1/books/${encodeURIComponent(bookId)}/summary.pdf`, undefined, 110_000);
   if (res === "unlinked") return void (await promptLink(chatId));
@@ -1117,6 +1151,17 @@ async function sendNotesDocx(chatId: number, from: TgUser, bookId: string): Prom
   if (!b || b.studyNotesStatus !== "READY") {
     return void (await sendMessage(chatId, "📒 جزوهٔ این کتاب هنوز آماده نشده است."));
   }
+  // راند ۲۳ — مسیر فوری: PDF جزوه از قبل در تلگرام ذخیره شده → ارسال مستقیم با file_id دائمی
+  const tgFid = tgFileId(b, "NOTES_PDF");
+  if (tgFid) {
+    const sent = await safeTg<TgMessage>("sendDocument", {
+      chat_id: chatId,
+      document: tgFid,
+      caption: `📒 جزوهٔ شبامتحان کتاب «${trunc(b.title, 80)}» — PDF با فونت فارسی (وزیرمتن)`,
+    });
+    if (sent) return;
+    // ارسال file_id ناموفق بود → ادامه با مسیر بایت‌های زیر (fallback)
+  }
   // راند ۲۲ — جزوه به‌صورت PDF فارسی (فونت وزیرمتن جاسازی‌شده)
   const res = await authed(chatId, from, `/api/v1/books/${encodeURIComponent(bookId)}/notes.pdf`, undefined, 110_000);
   if (res === "unlinked") return void (await promptLink(chatId));
@@ -1148,6 +1193,31 @@ async function sendPodcast(chatId: number, from: TgUser, bookId: string, opts: {
       `🎧 پادکست این کتاب هنوز تولید نشده است.\n${statusFa(b?.podcastStatus)} — کمی بعد دوباره تلاش کنید. 🙏`
     ));
   }
+  // راند ۲۲ — دکمهٔ «ذخیره در پیام‌های ذخیره» زیر پادکست (نسخهٔ ذخیره: بدون دکمه + پیشوند 📌)
+  // راند ۲۳ — کپشن/دکمه مشترک بین مسیر فوری (file_id) و مسیر بایت‌ها
+  const caption = opts.forSaved
+    ? `📌 ذخیره‌شده از پلتفرم آموزش هوشمند — 🎧 پادکست صوتی کتاب «${trunc(b.title, 80)}»${
+        b.podcastDurationSec ? ` — ${durationFa(b.podcastDurationSec)}` : ""
+      }\nشنیدن شما خوش! 🎶`
+    : `🎧 پادکست صوتی کتاب «${trunc(b.title, 80)}»${
+        b.podcastDurationSec ? ` — ${durationFa(b.podcastDurationSec)}` : ""
+      }\nشنیدن شما خوش! 🎶\nبرای نگه‌داشتن در تلگرام، دکمهٔ ذخیره را بزنید. 📥`;
+  const markup = opts.forSaved
+    ? undefined
+    : { inline_keyboard: [[{ text: "📥 ذخیره در پیام‌های ذخیره", callback_data: `podsave:${bookId}` }]] };
+  // راند ۲۳ — مسیر فوری: پادکست از قبل در تلگرام ذخیره شده → ارسال مستقیم با file_id دائمی
+  // (title/performer/duration در ارسال file_id توسط تلگرام نادیده گرفته می‌شوند — مشکلی نیست)
+  const tgFid = tgFileId(b, "PODCAST_AUDIO");
+  if (tgFid) {
+    const sent = await safeTg<TgMessage>("sendAudio", {
+      chat_id: chatId,
+      audio: tgFid,
+      caption,
+      ...(markup ? { reply_markup: markup } : {}),
+    });
+    if (sent) return;
+    // ارسال file_id ناموفق بود → ادامه با مسیر بایت‌های زیر (fallback)
+  }
   const res = await authed(chatId, from, `/api/v1/books/${encodeURIComponent(bookId)}/podcast`, undefined, 120_000);
   if (res === "unlinked") return void (await promptLink(chatId));
   if (!res || !res.ok) return void (await sendMessage(chatId, `⚠️ ${esc(apiErrorText(await readJson(res)))}`));
@@ -1162,22 +1232,9 @@ async function sendPodcast(chatId: number, from: TgUser, bookId: string, opts: {
   fd.append("audio", new Blob([buf], { type: "audio/wav" }), `${safeFilename(b.title)}.wav`);
   fd.append("title", trunc(`پادکست کتاب ${b.title}`, 64));
   fd.append("performer", "پلتفرم آموزش هوشمند");
-  // راند ۲۲ — دکمهٔ «ذخیره در پیام‌های ذخیره» زیر پادکست (نسخهٔ ذخیره: بدون دکمه + پیشوند 📌)
-  const caption = opts.forSaved
-    ? `📌 ذخیره‌شده از پلتفرم آموزش هوشمند — 🎧 پادکست صوتی کتاب «${trunc(b.title, 80)}»${
-        b.podcastDurationSec ? ` — ${durationFa(b.podcastDurationSec)}` : ""
-      }\nشنیدن شما خوش! 🎶`
-    : `🎧 پادکست صوتی کتاب «${trunc(b.title, 80)}»${
-        b.podcastDurationSec ? ` — ${durationFa(b.podcastDurationSec)}` : ""
-      }\nشنیدن شما خوش! 🎶\nبرای نگه‌داشتن در تلگرام، دکمهٔ ذخیره را بزنید. 📥`;
   fd.append("caption", caption);
   if (b.podcastDurationSec) fd.append("duration", String(Math.round(b.podcastDurationSec)));
-  if (!opts.forSaved) {
-    fd.append(
-      "reply_markup",
-      JSON.stringify({ inline_keyboard: [[{ text: "📥 ذخیره در پیام‌های ذخیره", callback_data: `podsave:${bookId}` }]] })
-    );
-  }
+  if (markup) fd.append("reply_markup", JSON.stringify(markup));
   const sent = await safeTg<TgMessage>("sendAudio", undefined, { multipart: fd, timeoutMs: 120_000 });
   if (!sent) await sendMessage(chatId, "⚠️ ارسال پادکست ناموفق بود، دوباره تلاش کنید.");
 }
@@ -1191,6 +1248,26 @@ async function sendOriginalPdf(chatId: number, from: TgUser, bookId: string, opt
   const b = dres && dres.ok ? await readJson<BookDetailEx>(dres) : null;
   if (!b || !b.hasOriginalPdf) {
     return void (await sendMessage(chatId, "📥 نسخهٔ اصلی (PDF) برای این کتاب ضمیمه نشده است."));
+  }
+  // راند ۲۲ — دکمهٔ «ذخیره در پیام‌های ذخیره» زیر فایل (نسخهٔ ذخیره: بدون دکمه)
+  // راند ۲۳ — کپشن/دکمه مشترک بین مسیر فوری (file_id) و مسیر بایت‌ها
+  const caption = opts.forSaved
+    ? `📌 ذخیره‌شده از پلتفرم آموزش هوشمند — 📥 نسخهٔ اصلی کتاب «${trunc(b.title, 80)}»`
+    : `📥 نسخهٔ اصلی کتاب «${trunc(b.title, 80)}» — پلتفرم آموزش هوشمند ایران 🎓\nبرای نگه‌داشتن در تلگرام، دکمهٔ ذخیره را بزنید. 📥`;
+  const markup = opts.forSaved
+    ? undefined
+    : { inline_keyboard: [[{ text: "📥 ذخیره در پیام‌های ذخیره", callback_data: `origsave:${bookId}` }]] };
+  // راند ۲۳ — مسیر فوری: PDF اصلی از قبل در تلگرام ذخیره شده → ارسال مستقیم با file_id دائمی
+  const tgFid = tgFileId(b, "ORIGINAL_PDF");
+  if (tgFid) {
+    const sent = await safeTg<TgMessage>("sendDocument", {
+      chat_id: chatId,
+      document: tgFid,
+      caption,
+      ...(markup ? { reply_markup: markup } : {}),
+    });
+    if (sent) return;
+    // ارسال file_id ناموفق بود → ادامه با مسیر بایت‌های زیر (fallback)
   }
   const res = await authed(chatId, from, `/api/v1/books/${encodeURIComponent(bookId)}/original.pdf`, undefined, 90_000);
   if (res === "unlinked") return void (await promptLink(chatId));
@@ -1207,19 +1284,8 @@ async function sendOriginalPdf(chatId: number, from: TgUser, bookId: string, opt
   const fd = new FormData();
   fd.append("chat_id", String(chatId));
   fd.append("document", new Blob([buf], { type: "application/pdf" }), fname);
-  fd.append(
-    "caption",
-    opts.forSaved
-      ? `📌 ذخیره‌شده از پلتفرم آموزش هوشمند — 📥 نسخهٔ اصلی کتاب «${trunc(b.title, 80)}»`
-      : `📥 نسخهٔ اصلی کتاب «${trunc(b.title, 80)}» — پلتفرم آموزش هوشمند ایران 🎓\nبرای نگه‌داشتن در تلگرام، دکمهٔ ذخیره را بزنید. 📥`
-  );
-  // راند ۲۲ — دکمهٔ «ذخیره در پیام‌های ذخیره» زیر فایل (نسخهٔ ذخیره: بدون دکمه)
-  if (!opts.forSaved) {
-    fd.append(
-      "reply_markup",
-      JSON.stringify({ inline_keyboard: [[{ text: "📥 ذخیره در پیام‌های ذخیره", callback_data: `origsave:${bookId}` }]] })
-    );
-  }
+  fd.append("caption", caption);
+  if (markup) fd.append("reply_markup", JSON.stringify(markup));
   const sent = await safeTg<TgMessage>("sendDocument", undefined, { multipart: fd, timeoutMs: 120_000 });
   if (!sent) await sendMessage(chatId, "⚠️ ارسال فایل ناموفق بود، دوباره تلاش کنید.");
 }
@@ -1239,6 +1305,18 @@ async function sendQuizPdf(chatId: number, from: TgUser, bookId: string): Promis
       chatId,
       `✍️ نمونه‌سؤال‌های این کتاب هنوز آماده نشده است.\n${statusFa(b.quizStatus)} — کمی بعد دوباره تلاش کنید. 🙏`
     ));
+  }
+  // راند ۲۳ — مسیر فوری: برگهٔ نمونه‌سؤال (MC) از قبل در تلگرام ذخیره شده → ارسال مستقیم با file_id
+  // (مدل‌های دیگر TF/FB/SHORT/MIXED ممکن است هنوز کش نشده باشند → همان مسیر بایت‌ها)
+  const tgFid = tgFileId(b, "QUIZ_PDF_MC");
+  if (tgFid) {
+    const sent = await safeTg<TgMessage>("sendDocument", {
+      chat_id: chatId,
+      document: tgFid,
+      caption: `✍️ نمونه‌سؤال هوشمند کتاب «${trunc(b.title, 80)}» — برگهٔ رسمی آزمون (۴ گزینه‌ای) + پاسخ‌نامهٔ تشریحی · PDF با فونت فارسی`,
+    });
+    if (sent) return;
+    // ارسال file_id ناموفق بود → ادامه با مسیر بایت‌های زیر (fallback)
   }
   const res = await authed(chatId, from, `/api/v1/books/${encodeURIComponent(bookId)}/quiz.pdf?model=MC`, undefined, 110_000);
   if (res === "unlinked") return void (await promptLink(chatId));

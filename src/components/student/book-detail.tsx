@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
+import { toast as sonnerToast } from "sonner";
 import { api, ApiClientError, getToken } from "@/lib/app/api-client";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -20,9 +21,9 @@ import { Textarea } from "@/components/ui/textarea";
 import { EmptyState, ErrorState, faDateTime, faNum } from "@/components/shared/blocks";
 import { gradeLabelFa } from "@/lib/education-levels";
 import { cn } from "@/lib/utils";
-import { useToast } from "@/hooks/use-toast";
+import { useToast, toast } from "@/hooks/use-toast";
 import {
-  ArrowRight, BookOpen, Check, Download, Eye, FileDown, Headphones, Loader2, NotebookPen,
+  ArrowRight, BookOpen, Check, Cloud, Download, Eye, FileDown, Headphones, Loader2, NotebookPen,
   Printer, RefreshCw, Shapes, Sparkles, Trophy, X,
 } from "lucide-react";
 
@@ -54,6 +55,8 @@ export interface BookRow {
   podcastDurationSec: number | null;
   quizCount: number;
   hasOriginalPdf?: boolean; // Round 20 — نسخهٔ اصلی PDF برای دانلود
+  originalPdfInTelegram?: boolean; // Round 23 — باینری‌ها داخل تلگرام
+  podcastInTelegram?: boolean;
   createdAt: string;
   scope: "PLATFORM" | "TENANT" | "CLASSROOM";
 }
@@ -85,6 +88,8 @@ export interface BookDetailData extends BookRow {
   myAttempts: BookAttempt[];
   errorReason: string | null;
   hasOriginalPdf: boolean;
+  // Round 23 — نقشهٔ kind → fileId دائمی تلگرام (مثلاً ORIGINAL_PDF، PODCAST_AUDIO، SUMMARY_PDF…)
+  telegramFiles?: Record<string, string>;
 }
 
 interface QuizItem {
@@ -169,18 +174,41 @@ async function fetchBlob(url: string): Promise<{ blob: Blob; filename: string }>
   });
   if (!res.ok) {
     let message = "دریافت فایل از سرور ناموفق بود.";
+    let deepLink: string | undefined;
     try {
-      const body = (await res.json()) as { error?: { message?: string } } | null;
+      const body = (await res.json()) as { error?: { message?: string; deepLink?: string } } | null;
       if (body?.error?.message) message = body.error.message;
+      deepLink = body?.error?.deepLink;
     } catch {
       /* binary/error body — keep the default message */
     }
-    throw new ApiClientError("DOWNLOAD_FAILED", message, res.status);
+    throw new ApiClientError("DOWNLOAD_FAILED", message, res.status, deepLink);
   }
   const cd = res.headers.get("Content-Disposition") ?? "";
   const star = /filename\*=UTF-8''([^;]+)/.exec(cd);
   const filename = star ? decodeURIComponent(star[1]) : "file";
   return { blob: await res.blob(), filename };
+}
+
+// Round 23 — خطای دانلود: اگر فایل از سقف دانلود مستقیم وب بزرگ‌تر باشد، سرور پیام فارسی
+// + لینک عمیق تلگرام (t.me/…) برمی‌گرداند → توست sonner با دکمهٔ «دریافت از تلگرام».
+function showDownloadError(e: unknown, title: string) {
+  if (e instanceof ApiClientError && e.deepLink) {
+    const link = e.deepLink;
+    sonnerToast.error(e.message, {
+      duration: 30000,
+      action: {
+        label: "دریافت از تلگرام",
+        onClick: () => window.open(link, "_blank"),
+      },
+    });
+    return;
+  }
+  toast({
+    title,
+    description: e instanceof ApiClientError ? e.message : undefined,
+    variant: "destructive",
+  });
 }
 
 const PRINT_CSS = `
@@ -362,11 +390,7 @@ export function BookDetailView({
       saveBlob(blob, filename, `${book.title.slice(0, 40)}.pdf`);
       toast({ title: "نسخهٔ اصلی کتاب دانلود شد", description: `«${filename}» — خود کتاب PDF.` });
     } catch (e) {
-      toast({
-        title: "دانلود نسخهٔ اصلی ناموفق بود",
-        description: e instanceof ApiClientError ? e.message : undefined,
-        variant: "destructive",
-      });
+      showDownloadError(e, "دانلود نسخهٔ اصلی ناموفق بود");
     } finally {
       setOriginalPdfBusy(false);
     }
@@ -380,11 +404,7 @@ export function BookDetailView({
       saveBlob(blob, filename, "summary.docx");
       toast({ title: "فایل Word دانلود شد", description: `«${filename}» — خلاصهٔ کامل کتاب با قالب فارسی.` });
     } catch (e) {
-      toast({
-        title: "دانلود Word ناموفق بود",
-        description: e instanceof ApiClientError ? e.message : undefined,
-        variant: "destructive",
-      });
+      showDownloadError(e, "دانلود Word ناموفق بود");
     } finally {
       setDocxBusy(false);
     }
@@ -399,11 +419,7 @@ export function BookDetailView({
       saveBlob(blob, filename, `خلاصه-${book.title.slice(0, 40)}.pdf`);
       toast({ title: "خلاصهٔ PDF دانلود شد", description: `«${filename}» — با فونت فارسی وزیرمتن، آمادهٔ چاپ.` });
     } catch (e) {
-      toast({
-        title: "دانلود PDF ناموفق بود",
-        description: e instanceof ApiClientError ? e.message : undefined,
-        variant: "destructive",
-      });
+      showDownloadError(e, "دانلود PDF ناموفق بود");
     } finally {
       setSummaryPdfBusy(false);
     }
@@ -417,11 +433,7 @@ export function BookDetailView({
       saveBlob(blob, filename, "jozve.docx");
       toast({ title: "جزوهٔ Word دانلود شد", description: `«${filename}» — جزوهٔ شبامتحان با قالب فارسی.` });
     } catch (e) {
-      toast({
-        title: "دانلود جزوه ناموفق بود",
-        description: e instanceof ApiClientError ? e.message : undefined,
-        variant: "destructive",
-      });
+      showDownloadError(e, "دانلود جزوهٔ Word ناموفق بود");
     } finally {
       setNotesDocxBusy(false);
     }
@@ -436,11 +448,7 @@ export function BookDetailView({
       saveBlob(blob, filename, `جزوه-${book.title.slice(0, 40)}.pdf`);
       toast({ title: "جزوهٔ PDF دانلود شد", description: `«${filename}» — با فونت فارسی وزیرمتن، آمادهٔ چاپ.` });
     } catch (e) {
-      toast({
-        title: "دانلود جزوهٔ PDF ناموفق بود",
-        description: e instanceof ApiClientError ? e.message : undefined,
-        variant: "destructive",
-      });
+      showDownloadError(e, "دانلود جزوهٔ PDF ناموفق بود");
     } finally {
       setNotesPdfBusy(false);
     }
@@ -457,11 +465,7 @@ export function BookDetailView({
         description: `«${filename}» — برگهٔ رسمی آزمون + پاسخ‌نامهٔ تشریحی.`,
       });
     } catch (e) {
-      toast({
-        title: "دانلود نمونه‌سؤال PDF ناموفق بود",
-        description: e instanceof ApiClientError ? e.message : undefined,
-        variant: "destructive",
-      });
+      showDownloadError(e, "دانلود نمونه‌سؤال PDF ناموفق بود");
     } finally {
       setQuizPdfBusy((prev) => ({ ...prev, [model]: false }));
     }
@@ -478,7 +482,13 @@ export function BookDetailView({
       setPodcastFilename(filename || `podcast-${book.title.slice(0, 40)}.wav`);
       setPodcastUrl(url);
     } catch (e) {
-      setPodcastError(e instanceof ApiClientError ? e.message : "دریافت پادکست ناموفق بود.");
+      // Round 23 — فایل بزرگ‌تر از سقف دانلود مستقیم → توست با دکمهٔ «دریافت از تلگرام»
+      if (e instanceof ApiClientError && e.deepLink) {
+        showDownloadError(e, "دریافت پادکست ناموفق بود");
+        setPodcastError(null);
+      } else {
+        setPodcastError(e instanceof ApiClientError ? e.message : "دریافت پادکست ناموفق بود.");
+      }
     } finally {
       setPodcastLoading(false);
     }
@@ -588,6 +598,13 @@ export function BookDetailView({
                   <Badge variant="secondary" className="text-[10px]">{SCOPE_LABEL[book.scope]}</Badge>
                   {detail?.tenantName && <Badge variant="secondary" className="text-[10px]">{detail.tenantName}</Badge>}
                   <Badge variant="secondary" className="text-[10px] tabular-nums">{faNum(book.charCount)} نویسه</Badge>
+                  {/* Round 23 — باینری‌های این کتاب داخل خود تلگرام ذخیره شده‌اند و از همان‌جا سرو می‌شوند */}
+                  {detail?.telegramFiles && Object.keys(detail.telegramFiles).length > 0 && (
+                    <Badge className="bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border border-emerald-500/40 text-[10px]">
+                      <Cloud className="h-3 w-3 ml-0.5" aria-hidden />
+                      ذخیره‌شده در تلگرام
+                    </Badge>
+                  )}
                 </div>
                 {(book.hasOriginalPdf ?? detail?.hasOriginalPdf) && (
                   <Button

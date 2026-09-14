@@ -523,6 +523,11 @@ model Book {
   // is kept on disk so students can download the actual book (storage/books/<id>-original.pdf).
   originalPdfPath String? // absolute-ish storage path of the kept original PDF
   originalPdfName String? // human file name (e.g. ریاضی-سوم.pdf) for downloads
+  // Round 23 — «ذخیره‌سازی کامل در تلگرام»: binaries live ONLY inside Telegram
+  // (TelegramAsset.fileId); the host keeps just tiny text rows. When the flag is true
+  // the local binary has been uploaded and deleted.
+  originalPdfTelegram Boolean @default(false)
+  podcastTelegram   Boolean @default(false)
   approvalStatus String @default("NOT_REQUIRED") // NOT_REQUIRED (platform) | PENDING | APPROVED | REJECTED
   approvalNote  String? // e.g. rejection reason shown to the uploader
   errorReason String?
@@ -530,10 +535,37 @@ model Book {
   updatedAt   DateTime @updatedAt
 
   attempts BookQuizAttempt[]
+  telegramAssets TelegramAsset[]
 
   @@index([tenantId, status])
   @@index([approvalStatus, createdAt])
   @@index([addedById])
+}
+
+// ─────────────────────────────── Telegram-as-Storage (round 23) ───────────────────────────────
+// Manager round-23 rule: «کلا هیچ چیز در هاست ذخیره نشه، همه چیز در تلگرام».
+// Every binary of a book (original PDF, podcast audio, rendered Persian-PDF artifacts)
+// is uploaded ONCE to the Telegram storage chat via the bot; Telegram answers with a
+// PERMANENT file_id which is stored here. Later sends (bot OR web proxy via getFile)
+// reuse the file_id — instant, no re-upload, nothing on the host disk.
+// Limits honored: ≤50MB per bot upload, ≤20MB for web proxy downloads via getFile
+// (bigger files are served through the bot itself with a t.me deep-link).
+model TelegramAsset {
+  id           String   @id @default(cuid())
+  bookId       String
+  book         Book     @relation(fields: [bookId], references: [id], onDelete: Cascade)
+  kind         String // ORIGINAL_PDF | PODCAST_AUDIO | SUMMARY_PDF | NOTES_PDF | QUIZ_PDF_MC | QUIZ_PDF_TF | QUIZ_PDF_FB | QUIZ_PDF_SHORT | QUIZ_PDF_MIXED
+  fileId       String // permanent Telegram file_id (reusable for instant sends)
+  fileUniqueId String // stable across token changes (identity key)
+  fileName     String?
+  sizeBytes    Int      @default(0)
+  messageId    String? // message in the storage chat (for deletion cleanup)
+  storageChatId String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([bookId, kind])
+  @@index([bookId])
 }
 
 // Lightweight practice attempts on a book's sample questions — shared by web AND Telegram

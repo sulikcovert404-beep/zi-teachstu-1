@@ -12,6 +12,18 @@ import { awardPoints, POINT_REASONS } from "./points";
 import { audit } from "./audit";
 import { attachOriginalPdf } from "./pdf-extract";
 import { renderDocPdf, renderQuizPdf } from "./pdf-export";
+import {
+  getTelegramAsset,
+  listTelegramAssets,
+  invalidateTelegramAsset,
+  purgeTelegramAssets,
+  proxyTelegramAsset,
+  telegramDeepLink,
+  tooBigError,
+  tgStorageRuntime,
+  uploadTelegramAsset,
+  type TelegramAssetKind,
+} from "./telegram-storage";
 import { isLevelCode, levelLabel, isValidGradeForLevel } from "@/lib/education-levels";
 import type { AuthContext } from "@/server/auth/session";
 
@@ -166,6 +178,9 @@ export async function createBook(ctx: AuthContext, input: CreateBookInput) {
         where: { id: book.id },
         data: { originalPdfPath: attached.path, originalPdfName: attached.name },
       });
+      // Round 23 — «هیچ چیزی در هاست ذخیره نشه»: PDF اصلی به چت ذخیره‌سازی تلگرام
+      // منتقل و نسخهٔ محلی حذف می‌شود (fileId دائمی در TelegramAsset ثبت می‌شود).
+      void pushOriginalPdfToTelegram(book.id).catch(() => undefined);
     }
   }
 
@@ -240,7 +255,7 @@ async function generateBookArtifacts(bookId: string) {
   await refreshBookStatus(bookId);
 }
 
-async function generateArtifact(book: { id: string; title: string; subject: string | null; gradeLevel: string | null; contentText: string; tenantId: string | null; addedById: string }, kind: ArtifactKind) {
+async function generateArtifact(book: { id: string; title: string; subject: string | null; gradeLevel: string | null; level: string | null; author: string | null; contentText: string; tenantId: string | null; addedById: string }, kind: ArtifactKind) {
   const bookId = book.id;
   try {
     if (kind === "summary") {
@@ -253,6 +268,10 @@ async function generateArtifact(book: { id: string; title: string; subject: stri
         maxOutputChars: 12_000,
       });
       await db.book.update({ where: { id: bookId }, data: { summary: ai.content, summaryStatus: "READY" } });
+      // Round 23 — خلاصهٔ PDF (وزیرمتن) همان‌جا رندر و در تلگرام ذخیره می‌شود
+      await renderAndUploadArtifactPdf(book, "SUMMARY_PDF", () =>
+        buildSummaryPdfFor({ ...book, summary: ai.content })
+      );
     } else if (kind === "notes") {
       const ai = await aiComplete({
         feature: FEATURES.SUMMARIZER,
@@ -263,6 +282,9 @@ async function generateArtifact(book: { id: string; title: string; subject: stri
         maxOutputChars: 10_000,
       });
       await db.book.update({ where: { id: bookId }, data: { studyNotes: ai.content, studyNotesStatus: "READY" } });
+      await renderAndUploadArtifactPdf(book, "NOTES_PDF", () =>
+        buildStudyNotesPdfFor({ ...book, studyNotes: ai.content })
+      );
     } else if (kind === "quiz") {
       const ai = await aiComplete({
         feature: FEATURES.QUESTION_GENERATOR,
@@ -282,6 +304,10 @@ async function generateArtifact(book: { id: string; title: string; subject: stri
           quizCount: quiz.mc.length + quiz.tf.length + quiz.fb.length + quiz.short.length,
         },
       });
+      // برگهٔ آزمون MC به‌عنوان مدل اصلی همین‌جا در تلگرام ذخیره می‌شود
+      await renderAndUploadArtifactPdf(book, "QUIZ_PDF_MC", () =>
+        buildQuizPdfFor(book, quiz, "MC")
+      );
     } else if (kind === "figures") {
       const ai = await aiComplete({
         feature: FEATURES.QUESTION_GENERATOR,
@@ -316,10 +342,32 @@ async function generateArtifact(book: { id: string; title: string; subject: stri
       await fs.mkdir(STORAGE_DIR, { recursive: true });
       const filePath = path.join(STORAGE_DIR, `${bookId}.wav`);
       await fs.writeFile(filePath, spoken.audio);
-      await db.book.update({
-        where: { id: bookId },
-        data: { podcastPath: filePath, podcastStatus: "READY", podcastDurationSec: spoken.durationSec },
+      // Round 23 — پادکست به چت ذخیره‌سازی تلگرام می‌رود؛ اگر موفق بود نسخهٔ محلی پاک می‌شود
+      const stored = await uploadTelegramAsset({
+        bookId,
+        kind: "PODCAST_AUDIO",
+        bytes: spoken.audio,
+        fileName: `podcast-${safeFileName(book.title)}.wav`,
+        asAudio: true,
+        audioMeta: {
+          title: `پادکست ${book.title}`.slice(0, 60),
+          performer: "پلتفرم آموزش هوشمند ایران",
+          durationSec: spoken.durationSec,
+        },
+        caption: `🎙 پادکست کتاب «${book.title}» — ذخیره‌سازی تلگرامی پلتفرم آموزش هوشمند`,
       });
+      if (stored) {
+        await fs.rm(filePath, { force: true }).catch(() => undefined);
+        await db.book.update({
+          where: { id: bookId },
+          data: { podcastPath: null, podcastTelegram: true, podcastStatus: "READY", podcastDurationSec: spoken.durationSec },
+        });
+      } else {
+        await db.book.update({
+          where: { id: bookId },
+          data: { podcastPath: filePath, podcastTelegram: false, podcastStatus: "READY", podcastDurationSec: spoken.durationSec },
+        });
+      }
     }
   } catch (e) {
     await markArtifactFailed(bookId, artifactStatusField(kind), e);
@@ -361,6 +409,87 @@ async function refreshBookStatus(bookId: string) {
   await db.book.update({ where: { id: bookId }, data: { status } }).catch(() => undefined);
 }
 
+// ── Round 23 — «ذخیره‌سازی کامل در تلگرام»: helperهای انتقال باینری‌ها ──
+
+function safeFileName(title: string): string {
+  return title.replace(/[\\/:*?"<>|\n\r]/g, "_").slice(0, 60) || "book";
+}
+
+/** PDF اصلی کتاب را از دیسک به چت ذخیره‌سازی تلگرام می‌برد و نسخهٔ محلی را حذف می‌کند. */
+async function pushOriginalPdfToTelegram(bookId: string): Promise<void> {
+  const book = await db.book.findUnique({ where: { id: bookId } });
+  if (!book?.originalPdfPath) return;
+  const bytes = await fs.readFile(book.originalPdfPath).catch(() => null);
+  if (!bytes) return;
+  const stored = await uploadTelegramAsset({
+    bookId,
+    kind: "ORIGINAL_PDF",
+    bytes,
+    fileName: safeFileName(book.originalPdfName ?? `${book.title}.pdf`),
+    caption: `📚 کتاب «${book.title}» — نسخهٔ اصلی PDF · ذخیره‌سازی تلگرامی پلتفرم آموزش هوشمند`,
+  });
+  if (stored) {
+    await fs.rm(book.originalPdfPath, { force: true }).catch(() => undefined);
+    await db.book
+      .update({ where: { id: bookId }, data: { originalPdfPath: null, originalPdfTelegram: true } })
+      .catch(() => undefined);
+    console.log(`[tg-storage] original PDF of book ${bookId} moved to Telegram — local copy deleted`);
+  }
+}
+
+/** پادکست WAV محلی را به تلگرام می‌برد و نسخهٔ محلی را حذف می‌کند. */
+async function pushPodcastWavToTelegram(bookId: string): Promise<boolean> {
+  const book = await db.book.findUnique({ where: { id: bookId } });
+  if (!book?.podcastPath || book.podcastStatus !== "READY") return false;
+  const bytes = await fs.readFile(book.podcastPath).catch(() => null);
+  if (!bytes) return false;
+  const stored = await uploadTelegramAsset({
+    bookId,
+    kind: "PODCAST_AUDIO",
+    bytes,
+    fileName: `podcast-${safeFileName(book.title)}.wav`,
+    asAudio: true,
+    audioMeta: {
+      title: `پادکست ${book.title}`.slice(0, 60),
+      performer: "پلتفرم آموزش هوشمند ایران",
+      durationSec: book.podcastDurationSec ?? undefined,
+    },
+    caption: `🎙 پادکست کتاب «${book.title}» — ذخیره‌سازی تلگرامی پلتفرم آموزش هوشمند`,
+  });
+  if (stored) {
+    await fs.rm(book.podcastPath, { force: true }).catch(() => undefined);
+    await db.book
+      .update({ where: { id: bookId }, data: { podcastPath: null, podcastTelegram: true } })
+      .catch(() => undefined);
+    return true;
+  }
+  return false;
+}
+
+/** رندر PDF فارسی از متن دیتابیس + آپلود به تلگرام — خطا هرگز وضعیت artifact را خراب نمی‌کند (فقط لاگ). */
+async function renderAndUploadArtifactPdf(
+  book: { id: string; title: string },
+  kind: "SUMMARY_PDF" | "NOTES_PDF" | "QUIZ_PDF_MC",
+  build: () => Promise<{ pdf: Uint8Array; filename: string }>
+): Promise<void> {
+  try {
+    const built = await build();
+    const label =
+      kind === "SUMMARY_PDF" ? "خلاصهٔ هوشمند" : kind === "NOTES_PDF" ? "جزوهٔ درسی" : "نمونه‌سؤال (برگهٔ آزمون)";
+    await uploadTelegramAsset({
+      bookId: book.id,
+      kind,
+      bytes: built.pdf,
+      fileName: built.filename,
+      caption: `📦 ${label} کتاب «${book.title}» — PDF با فونت فارسی (وزیرمتن) · ذخیره‌سازی تلگرامی پلتفرم`,
+    });
+  } catch (e) {
+    console.warn(
+      `[tg-storage] eager ${kind} render/upload skipped for ${book.id}: ${e instanceof Error ? e.message : e}`
+    );
+  }
+}
+
 export async function regenerateBookArtifact(ctx: AuthContext, bookId: string, kind: ArtifactKind) {
   const book = await db.book.findUnique({ where: { id: bookId } });
   if (!book) throw Errors.notFound("کتاب");
@@ -368,6 +497,24 @@ export async function regenerateBookArtifact(ctx: AuthContext, bookId: string, k
     throw Errors.forbidden("فقط ایجادکنندهٔ کتاب یا مدیر کل می‌تواند بازتولید کند.");
   }
   if (!ARTIFACT_KINDS.includes(kind)) throw Errors.validation("نوع محتوای درخواستی معتبر نیست.");
+
+  // Round 23 — assetهای تلگرامیِ مرتبط با این artifact باطل می‌شوند تا نسخهٔ تازه جایگزین شود
+  const related: TelegramAssetKind[] =
+    kind === "summary"
+      ? ["SUMMARY_PDF"]
+      : kind === "notes"
+        ? ["NOTES_PDF"]
+        : kind === "quiz"
+          ? ["QUIZ_PDF_MC", "QUIZ_PDF_TF", "QUIZ_PDF_FB", "QUIZ_PDF_SHORT", "QUIZ_PDF_MIXED"]
+          : kind === "podcast"
+            ? ["PODCAST_AUDIO"]
+            : [];
+  for (const assetKind of related) {
+    await invalidateTelegramAsset(bookId, assetKind);
+  }
+  if (kind === "podcast") {
+    await db.book.update({ where: { id: bookId }, data: { podcastTelegram: false } }).catch(() => undefined);
+  }
 
   await db.book.update({
     where: { id: bookId },
@@ -680,6 +827,8 @@ function bookSummary(book: {
   approvalNote: string | null;
   originalPdfPath: string | null;
   originalPdfName: string | null;
+  originalPdfTelegram: boolean;
+  podcastTelegram: boolean;
   createdAt: Date;
   tenantId: string | null;
   classroomId: string | null;
@@ -707,7 +856,9 @@ function bookSummary(book: {
     quizCount: book.quizCount,
     approvalStatus: book.approvalStatus,
     approvalNote: book.approvalNote,
-    hasOriginalPdf: Boolean(book.originalPdfPath),
+    hasOriginalPdf: Boolean(book.originalPdfPath) || book.originalPdfTelegram,
+    originalPdfInTelegram: book.originalPdfTelegram,
+    podcastInTelegram: book.podcastTelegram,
     createdAt: book.createdAt,
     scope: book.tenantId ? (book.classroomId ? "CLASSROOM" : "TENANT") : "PLATFORM",
     addedById: book.addedById,
@@ -801,6 +952,11 @@ export async function getBook(ctx: AuthContext, bookId: string) {
     take: 10,
   });
   const figures = book.figuresStatus === "READY" ? fromJson<BookFigure[]>(book.figures, []) : [];
+  // Round 23 — fileIdهای تلگرامی برای ارسال لحظه‌ای توسط بات (بدون دانلود مجدد)
+  const tgAssets = await db.telegramAsset.findMany({
+    where: { bookId },
+    select: { kind: true, fileId: true },
+  });
   return {
     ...bookSummary(book),
     addedByName: book.addedBy?.fullName ?? null,
@@ -818,6 +974,7 @@ export async function getBook(ctx: AuthContext, bookId: string) {
           }))
         : [],
     errorReason: book.errorReason,
+    telegramFiles: Object.fromEntries(tgAssets.map((a) => [a.kind, a.fileId])) as Record<string, string>,
     myAttempts: myAttempts.map((a) => ({
       id: a.id,
       quizModel: a.quizModel,
@@ -845,6 +1002,8 @@ export async function deleteBook(ctx: AuthContext, bookId: string) {
   if (book.originalPdfPath) {
     await fs.rm(book.originalPdfPath, { force: true }).catch(() => undefined);
   }
+  // Round 23 — پیام‌های ذخیره‌سازی تلگرام هم تمیز شوند (ردیف‌ها با cascade پاک می‌شوند)
+  await purgeTelegramAssets(bookId);
   await db.book.delete({ where: { id: bookId } });
   await audit({
     actorId: ctx.userId,
@@ -1097,6 +1256,28 @@ export async function listMyBookAttempts(ctx: AuthContext, bookId: string) {
 
 export async function bookOriginalPdf(ctx: AuthContext, bookId: string) {
   const book = await visibleBook(ctx, bookId);
+  // Round 23 — اول از تلگرام (fileId دائمی)؛ فقط اگر >۲۰MB بود و نسخهٔ محلی موجود بود، محلی را می‌دهیم
+  const tgAsset = await getTelegramAsset(bookId, "ORIGINAL_PDF");
+  if (tgAsset) {
+    const proxied = await proxyTelegramAsset(
+      { fileId: tgAsset.fileId, fileName: tgAsset.fileName, sizeBytes: tgAsset.sizeBytes },
+      { fallbackName: book.originalPdfName ?? `${book.title}.pdf`, contentType: "application/pdf" }
+    ).catch(() => null);
+    if (proxied && proxied.ok) {
+      return { data: proxied.data, filename: proxied.filename };
+    }
+    if (book.originalPdfPath) {
+      const localStat = await fs.stat(book.originalPdfPath).catch(() => null);
+      if (localStat) {
+        const data = await fs.readFile(book.originalPdfPath);
+        const name = (book.originalPdfName ?? `${book.title}.pdf`).replace(/[\\/:*?"<>|\n\r]/g, "_").slice(0, 100);
+        return { data, filename: /\.pdf$/i.test(name) ? name : `${name}.pdf` };
+      }
+    }
+    if (proxied && !proxied.ok && proxied.tooBig) {
+      throw tooBigError(proxied.sizeBytes, await telegramDeepLink(bookId, "ORIGINAL_PDF"));
+    }
+  }
   if (!book.originalPdfPath) {
     throw Errors.notFound("نسخهٔ اصلی (PDF) این کتاب");
   }
@@ -1109,13 +1290,47 @@ export async function bookOriginalPdf(ctx: AuthContext, bookId: string) {
 
 export async function bookPodcast(ctx: AuthContext, bookId: string) {
   const book = await visibleBook(ctx, bookId);
-  if (book.podcastStatus !== "READY" || !book.podcastPath) {
+  if (book.podcastStatus !== "READY") {
     throw Errors.validation("پادکست این کتاب هنوز تولید نشده است.");
+  }
+  const safeTitle = book.title.replace(/[\\/:*?"<>|]/g, "_").slice(0, 60);
+  // Round 23 — اول از تلگرام؛ fallback محلی فقط وقتی asset نبود یا پروکسی شکست خورد
+  const tgAsset = await getTelegramAsset(bookId, "PODCAST_AUDIO");
+  if (tgAsset) {
+    const proxied = await proxyTelegramAsset(
+      { fileId: tgAsset.fileId, fileName: tgAsset.fileName, sizeBytes: tgAsset.sizeBytes },
+      { fallbackName: `podcast-${safeTitle}.wav`, contentType: "audio/wav" }
+    ).catch(() => null);
+    if (proxied && proxied.ok) {
+      return {
+        audio: proxied.data,
+        durationSec: book.podcastDurationSec ?? null,
+        filename: proxied.filename,
+        contentType: "audio/wav",
+      };
+    }
+    if (book.podcastPath) {
+      const localStat = await fs.stat(book.podcastPath).catch(() => null);
+      if (localStat) {
+        const audio = await fs.readFile(book.podcastPath);
+        return {
+          audio,
+          durationSec: book.podcastDurationSec ?? null,
+          filename: `podcast-${safeTitle}.wav`,
+          contentType: "audio/wav",
+        };
+      }
+    }
+    if (proxied && !proxied.ok && proxied.tooBig) {
+      throw tooBigError(proxied.sizeBytes, await telegramDeepLink(bookId, "PODCAST_AUDIO"));
+    }
+  }
+  if (!book.podcastPath) {
+    throw Errors.notFound("فایل پادکست");
   }
   const stat = await fs.stat(book.podcastPath).catch(() => null);
   if (!stat) throw Errors.notFound("فایل پادکست");
   const audio = await fs.readFile(book.podcastPath);
-  const safeTitle = book.title.replace(/[\\/:*?"<>|]/g, "_").slice(0, 60);
   return {
     audio,
     durationSec: book.podcastDurationSec ?? null,
@@ -1285,6 +1500,8 @@ export async function bookStudyNotesDocx(ctx: AuthContext, bookId: string) {
 // خواستهٔ مدیر: «حتماً خروجی PDF با فونت مناسب فارسی» و سؤال‌ها با چارچوب رسمی
 // برگهٔ آزمون. هر سه سند با همان موتور رندر وب ساخته می‌شوند تا شکل‌دهی حروف
 // فارسی بی‌نقص باشد؛ فونت وزیرمتن داخل فایل جاسازی می‌شود.
+// Round 23 — هر PDF یک بار رندر می‌شود و در تلگرام (fileId) می‌ماند؛ درخواست‌های
+// بعدی مستقیماً از تلگرام پروکسی می‌شوند — روی هاست هیچ باینری‌ای نوشته نمی‌شود.
 
 function pdfMetaBits(book: { subject: string | null; gradeLevel: string | null; level: string | null; author: string | null }): string[] {
   const bits = [
@@ -1296,11 +1513,15 @@ function pdfMetaBits(book: { subject: string | null; gradeLevel: string | null; 
   return bits;
 }
 
-export async function bookSummaryPdf(ctx: AuthContext, bookId: string) {
-  const book = await visibleBook(ctx, bookId);
-  if (book.summaryStatus !== "READY" || !book.summary) {
-    throw Errors.validation("خلاصهٔ این کتاب هنوز تولید نشده است.");
-  }
+type BookPdfMeta = {
+  title: string;
+  subject: string | null;
+  gradeLevel: string | null;
+  level: string | null;
+  author: string | null;
+};
+
+async function buildSummaryPdfFor(book: BookPdfMeta & { summary: string }) {
   const pdf = await renderDocPdf({
     title: book.title,
     kind: "خلاصهٔ هوشمند کتاب",
@@ -1309,15 +1530,10 @@ export async function bookSummaryPdf(ctx: AuthContext, bookId: string) {
     footerNote: "خلاصهٔ هوشمند کتاب",
     intro: "این خلاصه به‌صورت خودکار از متن کامل کتاب تولید شده است — برای مرور سریع پیش از آزمون مناسب است.",
   });
-  const safeTitle = book.title.replace(/[\\/:*?"<>|]/g, "_").slice(0, 60);
-  return { pdf, filename: `summary-${safeTitle}.pdf` };
+  return { pdf, filename: `summary-${safeFileName(book.title)}.pdf` };
 }
 
-export async function bookStudyNotesPdf(ctx: AuthContext, bookId: string) {
-  const book = await visibleBook(ctx, bookId);
-  if (book.studyNotesStatus !== "READY" || !book.studyNotes) {
-    throw Errors.validation("جزوهٔ این کتاب هنوز تولید نشده است.");
-  }
+async function buildStudyNotesPdfFor(book: BookPdfMeta & { studyNotes: string }) {
   const pdf = await renderDocPdf({
     title: `جزوهٔ ${book.title}`,
     kind: "جزوهٔ درسی هوشمند",
@@ -1326,23 +1542,15 @@ export async function bookStudyNotesPdf(ctx: AuthContext, bookId: string) {
     footerNote: "جزوهٔ درسی هوشمند",
     intro: "جزوهٔ ساختاریافته با نکات کلیدی — برای مطالعهٔ هدفمند و مرور فصل‌به‌فصل آماده شده است.",
   });
-  const safeTitle = book.title.replace(/[\\/:*?"<>|]/g, "_").slice(0, 60);
-  return { pdf, filename: `jozve-${safeTitle}.pdf` };
+  return { pdf, filename: `jozve-${safeFileName(book.title)}.pdf` };
 }
 
-export async function bookQuizPdf(ctx: AuthContext, bookId: string, model: string) {
-  const book = await visibleBook(ctx, bookId);
-  if (book.quizStatus !== "READY" || !book.quiz) {
-    throw Errors.validation("نمونه‌سؤال‌های این کتاب هنوز آماده نشده است.");
-  }
-  const quizModel = (QUIZ_MODELS as readonly string[]).includes(model) ? (model as QuizModel) : "MC";
-  const items = quizItemsForModel(parseQuiz(book.quiz), quizModel);
-  if (items.length === 0) throw Errors.validation("این مدل سؤال برای کتاب موجود نیست.");
-
+async function buildQuizPdfFor(book: BookPdfMeta, quiz: BookQuiz, model: QuizModel) {
+  const items = quizItemsForModel(quiz, model);
   const pdf = await renderQuizPdf({
     title: `نمونه‌سؤال — ${book.title}`,
     metaBits: pdfMetaBits(book),
-    modelLabel: quizModelLabel(quizModel),
+    modelLabel: quizModelLabel(model),
     questions: items.map((it) => ({
       kind: it.kind,
       prompt: it.prompt,
@@ -1356,6 +1564,193 @@ export async function bookQuizPdf(ctx: AuthContext, bookId: string, model: strin
     })),
     footerNote: "نمونه‌سؤال هوشمند",
   });
-  const safeTitle = book.title.replace(/[\\/:*?"<>|]/g, "_").slice(0, 60);
-  return { pdf, filename: `quiz-${quizModel.toLowerCase()}-${safeTitle}.pdf` };
+  return { pdf, filename: `quiz-${model.toLowerCase()}-${safeFileName(book.title)}.pdf` };
+}
+
+/** اگر asset تلگرامی موجود باشد پروکسی می‌کنیم؛ وگرنه رندر + آپلود در تلگرام برای دفعات بعد. */
+async function proxyOrRender(
+  bookId: string,
+  kind: TelegramAssetKind,
+  fallbackName: string,
+  render: () => Promise<{ pdf: Uint8Array; filename: string }>
+): Promise<{ pdf: Uint8Array; filename: string }> {
+  const asset = await getTelegramAsset(bookId, kind);
+  if (asset) {
+    const proxied = await proxyTelegramAsset(
+      { fileId: asset.fileId, fileName: asset.fileName, sizeBytes: asset.sizeBytes },
+      { fallbackName, contentType: "application/pdf" }
+    ).catch(() => null);
+    if (proxied && proxied.ok) {
+      return { pdf: proxied.data, filename: proxied.filename };
+    }
+    if (proxied && !proxied.ok && proxied.tooBig) {
+      throw tooBigError(proxied.sizeBytes, await telegramDeepLink(bookId, kind));
+    }
+  }
+  const built = await render();
+  // کش در تلگرام — بار بعدی بدون رندر، مستقیم از تلگرام سرو می‌شود
+  void uploadTelegramAsset({
+    bookId,
+    kind,
+    bytes: built.pdf,
+    fileName: built.filename,
+    caption: `📦 محتوای هوشمند کتاب — PDF با فونت فارسی (وزیرمتن) · ذخیره‌سازی تلگرامی پلتفرم`,
+  }).catch(() => undefined);
+  return built;
+}
+
+export async function bookSummaryPdf(ctx: AuthContext, bookId: string) {
+  const book = await visibleBook(ctx, bookId);
+  const summary = book.summary;
+  if (book.summaryStatus !== "READY" || !summary) {
+    throw Errors.validation("خلاصهٔ این کتاب هنوز تولید نشده است.");
+  }
+  return proxyOrRender(bookId, "SUMMARY_PDF", `summary-${safeFileName(book.title)}.pdf`, () =>
+    buildSummaryPdfFor({ ...book, summary })
+  );
+}
+
+export async function bookStudyNotesPdf(ctx: AuthContext, bookId: string) {
+  const book = await visibleBook(ctx, bookId);
+  const studyNotes = book.studyNotes;
+  if (book.studyNotesStatus !== "READY" || !studyNotes) {
+    throw Errors.validation("جزوهٔ این کتاب هنوز تولید نشده است.");
+  }
+  return proxyOrRender(bookId, "NOTES_PDF", `jozve-${safeFileName(book.title)}.pdf`, () =>
+    buildStudyNotesPdfFor({ ...book, studyNotes })
+  );
+}
+
+export async function bookQuizPdf(ctx: AuthContext, bookId: string, model: string) {
+  const book = await visibleBook(ctx, bookId);
+  if (book.quizStatus !== "READY" || !book.quiz) {
+    throw Errors.validation("نمونه‌سؤال‌های این کتاب هنوز آماده نشده است.");
+  }
+  const quizModel = (QUIZ_MODELS as readonly string[]).includes(model) ? (model as QuizModel) : "MC";
+  const quiz = parseQuiz(book.quiz);
+  const items = quizItemsForModel(quiz, quizModel);
+  if (items.length === 0) throw Errors.validation("این مدل سؤال برای کتاب موجود نیست.");
+  const kind: TelegramAssetKind = `QUIZ_PDF_${quizModel}` as TelegramAssetKind;
+  return proxyOrRender(bookId, kind, `quiz-${quizModel.toLowerCase()}-${safeFileName(book.title)}.pdf`, () =>
+    buildQuizPdfFor(book, quiz, quizModel)
+  );
+}
+
+// ── Round 23 — انتقال دستی یک کتاب به ذخیره‌سازی تلگرام (برای کتاب‌های قدیمی) ──
+
+export async function migrateBookToTelegram(ctx: AuthContext, bookId: string) {
+  const book = await db.book.findUnique({ where: { id: bookId } });
+  if (!book) throw Errors.notFound("کتاب");
+  if (book.addedById !== ctx.userId && ctx.effectiveRole !== ROLES.SUPER_ADMIN) {
+    throw Errors.forbidden("فقط ایجادکنندهٔ کتاب یا مدیر کل می‌تواند انتقال به تلگرام انجام دهد.");
+  }
+  const cfg = await tgStorageRuntime();
+  if (!cfg) {
+    throw Errors.channelNotConfigured(
+      "ذخیره‌سازی تلگرام آماده نیست — توکن بات باید در تنظیمات ثبت شده باشد و حساب مدیر کل به تلگرام متصل باشد (یا شناسهٔ چت ذخیره‌سازی را در تنظیمات وارد کنید)."
+    );
+  }
+
+  const migrated: Array<{ kind: string; label: string; sizeBytes: number }> = [];
+  const skipped: Array<{ kind: string; label: string; reason: string }> = [];
+
+  // ۱) PDF اصلی
+  if (await getTelegramAsset(bookId, "ORIGINAL_PDF")) {
+    skipped.push({ kind: "ORIGINAL_PDF", label: "PDF اصلی کتاب", reason: "از قبل در تلگرام ذخیره است" });
+  } else if (book.originalPdfPath) {
+    await pushOriginalPdfToTelegram(bookId);
+    const asset = await getTelegramAsset(bookId, "ORIGINAL_PDF");
+    if (asset) migrated.push({ kind: "ORIGINAL_PDF", label: "PDF اصلی کتاب", sizeBytes: asset.sizeBytes });
+    else skipped.push({ kind: "ORIGINAL_PDF", label: "PDF اصلی کتاب", reason: "آپلود به تلگرام ناموفق بود — بعداً دوباره تلاش کنید" });
+  } else if (book.originalPdfTelegram) {
+    skipped.push({ kind: "ORIGINAL_PDF", label: "PDF اصلی کتاب", reason: "از قبل در تلگرام ذخیره است" });
+  } else {
+    skipped.push({ kind: "ORIGINAL_PDF", label: "PDF اصلی کتاب", reason: "این کتاب PDF اصلی ندارد" });
+  }
+
+  // ۲) پادکست
+  if (await getTelegramAsset(bookId, "PODCAST_AUDIO")) {
+    skipped.push({ kind: "PODCAST_AUDIO", label: "پادکست کتاب", reason: "از قبل در تلگرام ذخیره است" });
+  } else if (book.podcastPath && book.podcastStatus === "READY") {
+    const ok = await pushPodcastWavToTelegram(bookId);
+    if (ok) {
+      const asset = await getTelegramAsset(bookId, "PODCAST_AUDIO");
+      migrated.push({ kind: "PODCAST_AUDIO", label: "پادکست کتاب", sizeBytes: asset?.sizeBytes ?? 0 });
+    } else {
+      skipped.push({ kind: "PODCAST_AUDIO", label: "پادکست کتاب", reason: "آپلود به تلگرام ناموفق بود — بعداً دوباره تلاش کنید" });
+    }
+  } else if (book.podcastStatus !== "READY") {
+    skipped.push({ kind: "PODCAST_AUDIO", label: "پادکست کتاب", reason: "پادکست هنوز تولید نشده است" });
+  } else {
+    skipped.push({ kind: "PODCAST_AUDIO", label: "پادکست کتاب", reason: "فایل محلی پادکست موجود نیست — با «بازتولید» دوباره بسازید" });
+  }
+
+  // ۳) خلاصه/جزوه/نمونه‌سؤال MC — اگر متن‌ها READY باشند رندر و آپلود می‌شوند
+  const fresh = await db.book.findUnique({ where: { id: bookId } });
+  if (fresh) {
+    const freshSummary = fresh.summary;
+    if (fresh.summaryStatus === "READY" && freshSummary) {
+      if (await getTelegramAsset(bookId, "SUMMARY_PDF")) {
+        skipped.push({ kind: "SUMMARY_PDF", label: "خلاصهٔ PDF", reason: "از قبل در تلگرام ذخیره است" });
+      } else {
+        await renderAndUploadArtifactPdf(fresh, "SUMMARY_PDF", () => buildSummaryPdfFor({ ...fresh, summary: freshSummary }));
+        const asset = await getTelegramAsset(bookId, "SUMMARY_PDF");
+        if (asset) migrated.push({ kind: "SUMMARY_PDF", label: "خلاصهٔ PDF", sizeBytes: asset.sizeBytes });
+        else skipped.push({ kind: "SUMMARY_PDF", label: "خلاصهٔ PDF", reason: "رندر/آپلود ناموفق بود" });
+      }
+    } else {
+      skipped.push({ kind: "SUMMARY_PDF", label: "خلاصهٔ PDF", reason: "خلاصه هنوز تولید نشده است" });
+    }
+
+    const freshNotes = fresh.studyNotes;
+    if (fresh.studyNotesStatus === "READY" && freshNotes) {
+      if (await getTelegramAsset(bookId, "NOTES_PDF")) {
+        skipped.push({ kind: "NOTES_PDF", label: "جزوهٔ PDF", reason: "از قبل در تلگرام ذخیره است" });
+      } else {
+        await renderAndUploadArtifactPdf(fresh, "NOTES_PDF", () => buildStudyNotesPdfFor({ ...fresh, studyNotes: freshNotes }));
+        const asset = await getTelegramAsset(bookId, "NOTES_PDF");
+        if (asset) migrated.push({ kind: "NOTES_PDF", label: "جزوهٔ PDF", sizeBytes: asset.sizeBytes });
+        else skipped.push({ kind: "NOTES_PDF", label: "جزوهٔ PDF", reason: "رندر/آپلود ناموفق بود" });
+      }
+    } else {
+      skipped.push({ kind: "NOTES_PDF", label: "جزوهٔ PDF", reason: "جزوه هنوز تولید نشده است" });
+    }
+
+    if (fresh.quizStatus === "READY" && fresh.quiz) {
+      if (await getTelegramAsset(bookId, "QUIZ_PDF_MC")) {
+        skipped.push({ kind: "QUIZ_PDF_MC", label: "نمونه‌سؤال PDF", reason: "از قبل در تلگرام ذخیره است" });
+      } else {
+        await renderAndUploadArtifactPdf(fresh, "QUIZ_PDF_MC", () =>
+          buildQuizPdfFor(fresh, parseQuiz(fresh.quiz), "MC")
+        );
+        const asset = await getTelegramAsset(bookId, "QUIZ_PDF_MC");
+        if (asset) migrated.push({ kind: "QUIZ_PDF_MC", label: "نمونه‌سؤال PDF", sizeBytes: asset.sizeBytes });
+        else skipped.push({ kind: "QUIZ_PDF_MC", label: "نمونه‌سؤال PDF", reason: "رندر/آپلود ناموفق بود" });
+      }
+    } else {
+      skipped.push({ kind: "QUIZ_PDF_MC", label: "نمونه‌سؤال PDF", reason: "نمونه‌سؤال هنوز تولید نشده است" });
+    }
+  }
+
+  const assets = await listTelegramAssets(bookId);
+  await audit({
+    actorId: ctx.userId,
+    tenantId: book.tenantId,
+    action: "admin_action",
+    targetType: "book",
+    targetId: bookId,
+    metadata: { migratedToTelegram: migrated.map((m) => m.kind) },
+  });
+  return {
+    ok: true,
+    bookId,
+    title: book.title,
+    migrated,
+    skipped,
+    storage: {
+      chatId: cfg.chatId,
+      assets: assets.length,
+      bytes: assets.reduce((n, a) => n + a.sizeBytes, 0),
+    },
+  };
 }

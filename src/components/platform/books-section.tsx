@@ -27,8 +27,9 @@ import { PdfExtractInput, type PdfExtractResult } from "@/components/shared/pdf-
 import { gradeLabelFa } from "@/lib/education-levels";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
+import type { MigrateStorageResponse } from "./types";
 import {
-  BookOpen, CheckCircle2, FileText, Globe, Headphones, Info, Layers, Library, Loader2,
+  BookOpen, CheckCircle2, Cloud, CloudUpload, FileText, Globe, Headphones, Info, Layers, Library, Loader2,
   NotebookPen, PackageOpen, PenLine, Plus, RefreshCw, Settings, Shapes, Trash2, Upload, XCircle,
 } from "lucide-react";
 
@@ -98,6 +99,9 @@ interface PlatformBookRow {
   podcastDurationSec: number | null;
   quizCount: number;
   hasOriginalPdf: boolean; // Round 20 — نسخهٔ اصلی PDF ضمیمه شده
+  // Round 23 — ذخیره‌سازی در تلگرام
+  originalPdfInTelegram?: boolean;
+  podcastInTelegram?: boolean;
   approvalStatus: "NOT_REQUIRED" | "PENDING" | "APPROVED" | "REJECTED";
   approvalNote: string | null;
   createdAt: string;
@@ -151,6 +155,14 @@ function isBookBusy(b: PlatformBookRow): boolean {
   );
 }
 
+// Round 23 — کتاب کاملاً پشتیبان تلگرام نیست؟ (PDF اصلی یا پادکست آماده، داخل تلگرام)
+function needsTelegramMigration(b: PlatformBookRow): boolean {
+  return (
+    (b.hasOriginalPdf && !b.originalPdfInTelegram) ||
+    (b.podcastStatus === "READY" && !b.podcastInTelegram)
+  );
+}
+
 function StatusPill({ icon: Icon, label, status }: { icon: typeof FileText; label: string; status: string }) {
   const tone = artifactTone(status);
   return (
@@ -192,6 +204,8 @@ export function PlatformBooksSection() {
   const [rejectTarget, setRejectTarget] = useState<PlatformBookRow | null>(null);
   const [rejectNote, setRejectNote] = useState("");
   const [rejectBusy, setRejectBusy] = useState(false);
+  // Round 23 — انتقال باینری‌های کتاب به تلگرام (۱۰ تا ۲۵ ثانیه)
+  const [migrating, setMigrating] = useState<string | null>(null);
 
   useEffect(() => {
     let ignore = false;
@@ -264,6 +278,42 @@ export function PlatformBooksSection() {
       });
     } finally {
       setDeleting(null);
+    }
+  }
+
+  // ── Round 23 — انتقال باینری‌های یک کتاب به داخل تلگرام ──
+  async function migrateToTelegram(book: PlatformBookRow) {
+    setMigrating(book.id);
+    try {
+      const res = await api<MigrateStorageResponse>(`/api/v1/books/${book.id}/migrate-storage`, {
+        method: "POST",
+      });
+      const skippedNote =
+        res.skipped.length > 0
+          ? ` — رد شد: ${res.skipped.map((s) => `${s.label} (${s.reason})`).join("، ")}`
+          : "";
+      if (res.migrated.length > 0) {
+        toast({
+          title: `${faNum(res.migrated.length)} فایل به تلگرام منتقل شد ☁️`,
+          description: `${res.migrated.map((m) => m.label).join("، ")}${skippedNote}`,
+        });
+      } else {
+        toast({
+          title: "چیزی برای انتقال نبود",
+          description:
+            res.skipped.map((s) => `${s.label} — ${s.reason}`).join("، ") ||
+            "همهٔ فایل‌های این کتاب از قبل در تلگرام ذخیره شده‌اند.",
+        });
+      }
+      void refreshSilent();
+    } catch (e) {
+      toast({
+        title: "انتقال به تلگرام ناموفق بود",
+        description: e instanceof ApiClientError ? e.message : undefined,
+        variant: "destructive",
+      });
+    } finally {
+      setMigrating(null);
     }
   }
 
@@ -497,6 +547,19 @@ export function PlatformBooksSection() {
                           {b.mine && (
                             <Badge variant="secondary" className="text-[9px] shrink-0">بارگذاری من</Badge>
                           )}
+                          {(b.originalPdfInTelegram || b.podcastInTelegram) && (
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/40 bg-emerald-500/5 px-1.5 py-0.5 text-[9px] font-bold text-emerald-700 dark:text-emerald-400 shrink-0 cursor-default">
+                                  <Cloud className="h-3 w-3" aria-hidden />
+                                  تلگرام
+                                </span>
+                              </TooltipTrigger>
+                              <TooltipContent className="text-[10px] max-w-56">
+                                باینری‌های این کتاب (PDF، پادکست و PDFهای فارسی) داخل خود تلگرام ذخیره شده‌اند و از همان‌جا سرو می‌شوند
+                              </TooltipContent>
+                            </Tooltip>
+                          )}
                           {b.approvalStatus !== "NOT_REQUIRED" && (
                             <Tooltip>
                               <TooltipTrigger asChild>
@@ -591,6 +654,24 @@ export function PlatformBooksSection() {
                             </Button>
                           );
                         })}
+                        {/* Round 23 — انتقال باینری‌های کتاب به تلگرام (فقط مدیر کل) */}
+                        {data.role === "SUPER_ADMIN" && needsTelegramMigration(b) && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-8 text-[10px] border-emerald-500/40 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-500/10"
+                            disabled={migrating !== null || isBookBusy(b)}
+                            onClick={() => void migrateToTelegram(b)}
+                            title="انتقال PDF اصلی، پادکست و PDFهای فارسی این کتاب از هاست به داخل تلگرام (۱۰ تا ۲۵ ثانیه)"
+                          >
+                            {migrating === b.id ? (
+                              <Loader2 className="h-3 w-3 animate-spin ml-1" aria-hidden />
+                            ) : (
+                              <CloudUpload className="h-3 w-3 ml-1" aria-hidden />
+                            )}
+                            {migrating === b.id ? "در حال انتقال به تلگرام…" : "☁️ انتقال به تلگرام"}
+                          </Button>
+                        )}
                       </div>
                       <AlertDialog>
                         <AlertDialogTrigger asChild>

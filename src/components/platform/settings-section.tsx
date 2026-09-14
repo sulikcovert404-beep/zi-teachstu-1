@@ -48,7 +48,9 @@ import {
   Building2,
   Check,
   CheckCircle2,
+  Cloud,
   Copy,
+  Database,
   ExternalLink,
   Eye,
   EyeOff,
@@ -65,7 +67,7 @@ import {
   Wand2,
   Zap,
 } from "lucide-react";
-import { tenantStatusFa, type TenantRow } from "./types";
+import { faDigits, faSizeBytes, tenantStatusFa, type TelegramStorageBlock, type TenantRow } from "./types";
 
 // ── API contracts (src/server/services/settings.ts) ──
 
@@ -81,6 +83,10 @@ interface PlatformSettingsView {
   geminiModel: string;
   telegramMiniAppUrl: string;
   telegramBotUsername: string;
+  // Round 23 — ذخیره‌سازی کامل در تلگرام (raw fields + rich status block)
+  telegramStorageEnabled: boolean;
+  telegramStorageChatId: string; // "" = خودکار (چت مدیر کل متصل‌شده)
+  telegramStorage: TelegramStorageBlock;
   booksUploadTenants: string[];
   teacherBookUploadTenants: string[];
   hasGeminiKey: boolean;
@@ -357,6 +363,9 @@ export function SettingsSection() {
   const [adminUpload, setAdminUpload] = useState<Set<string>>(new Set());
   const [teacherUpload, setTeacherUpload] = useState<Set<string>>(new Set());
 
+  // Round 23 — ذخیره‌سازی در تلگرام
+  const [tgChatIdInput, setTgChatIdInput] = useState("");
+
   // وضعیت‌های مشغول و پیام درون‌کاری
   const [savingGemini, setSavingGemini] = useState(false);
   const [testingGemini, setTestingGemini] = useState(false);
@@ -364,9 +373,12 @@ export function SettingsSection() {
   const [testingTelegram, setTestingTelegram] = useState(false);
   const [configuringBot, setConfiguringBot] = useState(false);
   const [savingBooks, setSavingBooks] = useState(false);
+  const [togglingStorage, setTogglingStorage] = useState(false);
+  const [savingStorageChat, setSavingStorageChat] = useState(false);
   const [geminiMsg, setGeminiMsg] = useState<InlineMsg | null>(null);
   const [telegramMsg, setTelegramMsg] = useState<InlineMsg | null>(null);
   const [booksMsg, setBooksMsg] = useState<InlineMsg | null>(null);
+  const [storageMsg, setStorageMsg] = useState<InlineMsg | null>(null);
 
   const syncAll = useCallback((res: PlatformSettingsView) => {
     setSettings(res);
@@ -375,6 +387,7 @@ export function SettingsSection() {
     setGeminiKeyInput("");
     setMiniAppUrl(res.telegramMiniAppUrl);
     setBotTokenInput("");
+    setTgChatIdInput(res.telegramStorageChatId ?? "");
     setAdminUpload(new Set(res.booksUploadTenants));
     setTeacherUpload(new Set(res.teacherBookUploadTenants));
   }, []);
@@ -382,7 +395,7 @@ export function SettingsSection() {
   // فقط حوزهٔ همان کارت را با پاسخ سرور همگام می‌کند تا ویرایش‌های ذخیره‌نشدهٔ
   // کارت‌های دیگر از بین نرود.
   const applyScoped = useCallback(
-    (res: PlatformSettingsView, scope: "gemini" | "telegram" | "books") => {
+    (res: PlatformSettingsView, scope: "gemini" | "telegram" | "books" | "storage") => {
       setSettings(res);
       if (scope === "gemini") {
         setAiProvider(res.aiProvider === "gemini" ? "gemini" : "zai");
@@ -391,6 +404,8 @@ export function SettingsSection() {
       } else if (scope === "telegram") {
         setMiniAppUrl(res.telegramMiniAppUrl);
         setBotTokenInput("");
+      } else if (scope === "storage") {
+        setTgChatIdInput(res.telegramStorageChatId ?? "");
       } else {
         setAdminUpload(new Set(res.booksUploadTenants));
         setTeacherUpload(new Set(res.teacherBookUploadTenants));
@@ -469,6 +484,11 @@ export function SettingsSection() {
       settings.teacherBookUploadTenants.every((id) => teacherUpload.has(id));
     return !sameAdmin || !sameTeacher;
   }, [settings, adminUpload, teacherUpload]);
+
+  const storageChatDirty = useMemo(
+    () => !!settings && tgChatIdInput.trim() !== (settings.telegramStorageChatId ?? ""),
+    [settings, tgChatIdInput]
+  );
 
   const toggleInSet = useCallback(
     (setter: Dispatch<SetStateAction<Set<string>>>, id: string, on: boolean) => {
@@ -675,6 +695,83 @@ export function SettingsSection() {
     }
   }
 
+  // ── Round 23 — ذخیره‌سازی در تلگرام ──
+
+  async function toggleTelegramStorage(next: boolean) {
+    if (!settings) return;
+    setTogglingStorage(true);
+    setStorageMsg(null);
+    try {
+      const res = await api<PlatformSettingsView>("/api/v1/platform/settings", {
+        method: "PUT",
+        body: JSON.stringify({ telegramStorageEnabled: next }),
+      });
+      applyScoped(res, "storage");
+      setStorageMsg({
+        kind: "success",
+        title: next ? "ذخیره‌سازی در تلگرام فعال شد ☁️" : "ذخیره‌سازی در تلگرام غیرفعال شد",
+        body: next ? (
+          <p>
+            از این پس کتاب‌ها، پادکست‌ها و PDFهای فارسی داخل خود تلگرام نگه داشته می‌شوند — هیچ فایلی
+            روی هاست ذخیره نمی‌شود.
+          </p>
+        ) : (
+          <p>فایل‌های جدید موقتاً روی هاست می‌مانند تا دوباره فعالش کنید.</p>
+        ),
+      });
+      toast({
+        title: next ? "ذخیره‌سازی در تلگرام فعال شد" : "ذخیره‌سازی در تلگرام غیرفعال شد",
+      });
+    } catch (e) {
+      setStorageMsg({ kind: "error", title: "تغییر وضعیت ذخیره‌سازی ناموفق بود", body: <p>{errMsg(e)}</p> });
+      toast({ title: "تغییر وضعیت ذخیره‌سازی ناموفق بود", description: errMsg(e), variant: "destructive" });
+    } finally {
+      setTogglingStorage(false);
+    }
+  }
+
+  async function saveStorageChatId() {
+    if (!settings) return;
+    setSavingStorageChat(true);
+    setStorageMsg(null);
+    try {
+      const value = tgChatIdInput.trim();
+      const res = await api<PlatformSettingsView>("/api/v1/platform/settings", {
+        method: "PUT",
+        body: JSON.stringify({ telegramStorageChatId: value }),
+      });
+      applyScoped(res, "storage");
+      setStorageMsg({
+        kind: "success",
+        title: value ? "چت ذخیره‌سازی ثبت شد" : "چت ذخیره‌سازی به حالت خودکار برگشت",
+        body: (
+          <p>
+            {value
+              ? "فایل‌های تلگرامی از این پس به این چت/کانال فرستاده می‌شوند."
+              : "به‌طور خودکار از چت تلگرامِ مدیر کلِ متصل‌شده استفاده می‌شود."}{" "}
+            چت فعال: {" "}
+            <span dir="ltr" className="font-bold tabular-nums">
+              {res.telegramStorage?.storageChatId || "—"}
+            </span>
+          </p>
+        ),
+      });
+      toast({
+        title: value ? "چت ذخیره‌سازی ثبت شد" : "چت ذخیره‌سازی خودکار شد",
+        description: value ? tgChatIdInput.trim() : undefined,
+      });
+    } catch (e) {
+      setStorageMsg({
+        kind: "error",
+        title: "ذخیرهٔ چت ذخیره‌سازی ناموفق بود",
+        body: <p>{errMsg(e)}</p>,
+      });
+      toast({ title: "ذخیرهٔ چت ذخیره‌سازی ناموفق بود", description: errMsg(e), variant: "destructive" });
+    } finally {
+      setSavingStorageChat(false);
+    }
+  }
+
   // ── مجوزهای کتاب‌خانه ──
 
   async function saveBooks() {
@@ -725,7 +822,7 @@ export function SettingsSection() {
 
       {!settings && !loadError && (
         <div className="space-y-6">
-          {Array.from({ length: 3 }).map((_, i) => (
+          {Array.from({ length: 5 }).map((_, i) => (
             <Card key={i} className="border-border/60">
               <CardContent className="p-6 space-y-4">
                 <Skeleton className="h-6 w-48" />
@@ -1118,7 +1215,174 @@ export function SettingsSection() {
             </CardFooter>
           </Card>
 
-          {/* ═══ کارت ۳ — راهنمای گام‌به‌گام BotFather ═══ */}
+          {/* ═══ کارت ۳ — Round 23: ذخیره‌سازی در تلگرام ═══ */}
+          <Card className="border-border/60">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base flex items-center gap-2">
+                <Cloud className="h-4.5 w-4.5 text-primary" aria-hidden />
+                ذخیره‌سازی در تلگرام
+              </CardTitle>
+              <CardDescription>
+                کتاب‌ها، پادکست‌ها و PDFهای فارسی به‌جای هاست، داخل خود تلگرام نگه داشته
+                می‌شوند و مستقیماً از تلگرام سرو می‌شوند.
+              </CardDescription>
+              <CardAction>
+                {(() => {
+                  const ts = settings.telegramStorage;
+                  if (!ts?.configured) {
+                    return (
+                      <Badge variant="outline" className="border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-400">
+                        آماده نیست
+                      </Badge>
+                    );
+                  }
+                  if (ts.enabled) {
+                    return (
+                      <Badge variant="outline" className="border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400">
+                        فعال
+                      </Badge>
+                    );
+                  }
+                  return <Badge variant="outline" className="border-border">غیرفعال</Badge>;
+                })()}
+              </CardAction>
+            </CardHeader>
+            <CardContent className="space-y-5">
+              {settings.telegramStorage && (
+                <div className="grid gap-2 sm:grid-cols-3">
+                  <StatusChip
+                    icon={Cloud}
+                    label="چت ذخیره‌سازی"
+                    ok={settings.telegramStorage.configured && !!settings.telegramStorage.storageChatId}
+                  >
+                    {settings.telegramStorage.storageChatId ? (
+                      /^\d+$/.test(settings.telegramStorage.storageChatId) ? (
+                        faDigits(settings.telegramStorage.storageChatId)
+                      ) : (
+                        <span dir="ltr" className="font-mono text-xs">
+                          {settings.telegramStorage.storageChatId}
+                        </span>
+                      )
+                    ) : (
+                      "نامشخص"
+                    )}
+                  </StatusChip>
+                  <StatusChip icon={Bot} label="بات ذخیره‌ساز" ok={!!settings.telegramStorage.botUsername}>
+                    {settings.telegramStorage.botUsername ? (
+                      <span dir="ltr" className="font-bold">{`@${settings.telegramStorage.botUsername}`}</span>
+                    ) : (
+                      "ثبت نشده"
+                    )}
+                  </StatusChip>
+                  <StatusChip icon={Database} label="ذخیره‌شده در تلگرام" ok={settings.telegramStorage.assets > 0}>
+                    {faNum(settings.telegramStorage.assets)} فایل · {faSizeBytes(settings.telegramStorage.bytes)}
+                  </StatusChip>
+                </div>
+              )}
+
+              {!settings.telegramStorage?.configured && (
+                <Alert className="border-amber-500/40 bg-amber-500/5">
+                  <AlertTriangle className="h-4 w-4 text-amber-600 dark:text-amber-400" aria-hidden />
+                  <AlertTitle className="text-sm">ذخیره‌سازی تلگرام هنوز آماده نیست</AlertTitle>
+                  <AlertDescription className="text-xs leading-5">
+                    توکن بات را در کارت «اتصال ربات تلگرام» ثبت کنید و حساب مدیر کل را به تلگرام
+                    متصل کنید (یا شناسهٔ چت ذخیره‌سازی را در کادر پایین وارد کنید).
+                  </AlertDescription>
+                </Alert>
+              )}
+
+              <label
+                className={`flex items-center justify-between gap-3 rounded-xl border px-4 py-3 transition-colors ${
+                  togglingStorage
+                    ? "opacity-60 pointer-events-none border-border/60 bg-muted/20"
+                    : "cursor-pointer border-border/60 bg-muted/20 hover:border-primary/40"
+                }`}
+              >
+                <span className="min-w-0">
+                  <span className="block text-sm font-bold">فعال‌سازی ذخیره‌سازی در تلگرام</span>
+                  <span className="block text-[11px] text-muted-foreground leading-5 mt-1">
+                    روشن = هیچ فایلی روی هاست ذخیره نمی‌شود؛ همهٔ باینری‌ها داخل تلگرام
+                    می‌روند.
+                  </span>
+                </span>
+                <Switch
+                  checked={settings.telegramStorageEnabled}
+                  onCheckedChange={(checked) => void toggleTelegramStorage(checked)}
+                  disabled={togglingStorage}
+                  aria-label="فعال‌سازی ذخیره‌سازی در تلگرام"
+                  className="scale-110 shrink-0"
+                />
+              </label>
+
+              <form
+                className="space-y-2"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void saveStorageChatId();
+                }}
+              >
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <Label htmlFor="tg-storage-chat">شناسهٔ چت ذخیره‌سازی (اختیاری)</Label>
+                  <Badge variant="secondary" className="text-[10px]">
+                    {settings.telegramStorageChatId === "" ? "حالت خودکار" : "ثبت دستی"}
+                  </Badge>
+                </div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <Input
+                    id="tg-storage-chat"
+                    dir="ltr"
+                    autoComplete="off"
+                    spellCheck={false}
+                    inputMode="text"
+                    value={tgChatIdInput}
+                    onChange={(e) => setTgChatIdInput(e.target.value)}
+                    placeholder="۵۳۸۱۱۲۴۹۹۶ یا @storage_channel"
+                    disabled={savingStorageChat}
+                    className="text-left font-mono text-sm h-11 flex-1 min-w-52 sm:max-w-xs"
+                    aria-describedby="tg-storage-chat-hint"
+                  />
+                  <Button
+                    type="submit"
+                    variant="outline"
+                    disabled={savingStorageChat || !storageChatDirty}
+                    className="min-h-11"
+                  >
+                    {savingStorageChat ? (
+                      <Loader2 className="animate-spin" aria-hidden />
+                    ) : (
+                      <Save aria-hidden />
+                    )}
+                    ذخیره
+                  </Button>
+                </div>
+                <Hint>
+                  <span id="tg-storage-chat-hint">
+                    خالی بگذارید تا به‌طور خودکار از چت تلگرامِ مدیر کلِ متصل‌شده استفاده شود؛ یا
+                    شناسهٔ عددی چت/کانال تلگرام (مثلاً ۵۳۸۱۱۲۴۹۹۶) یا نام کانال عمومی (مثل{" "}
+                    <span dir="ltr" className="font-mono">
+                      @storage_channel
+                    </span>
+                    ) را وارد کنید.
+                  </span>
+                </Hint>
+              </form>
+
+              <Hint>
+                <span>
+                  هیچ فایلی روی هاست ذخیره نمی‌شود — کتاب‌ها، پادکست‌ها و PDFهای فارسی همگی داخل
+                  خود تلگرام نگه داشته می‌شوند و هر بار که کاربری (در وب یا تلگرام) درخواست کند،
+                  مستقیماً از تلگرام سرو می‌شوند. سقف هر فایل{" "}
+                  {faNum(settings.telegramStorage?.uploadLimitMb ?? 50)} مگابایت؛ دانلود مستقیم وب
+                  تا {faNum(settings.telegramStorage?.proxyLimitMb ?? 20)} مگابایت (بزرگ‌ترها با
+                  لینک خود بات).
+                </span>
+              </Hint>
+
+              {storageMsg && <InlineAlert msg={storageMsg} />}
+            </CardContent>
+          </Card>
+
+          {/* ═══ کارت ۴ — راهنمای گام‌به‌گام BotFather ═══ */}
           <Card className="border-border/60">
             <CardHeader className="pb-3">
               <CardTitle className="text-base flex items-center gap-2">
@@ -1283,7 +1547,7 @@ export function SettingsSection() {
             </CardContent>
           </Card>
 
-          {/* ═══ کارت ۴ — مجوزهای کتاب‌خانه ═══ */}
+          {/* ═══ کارت ۵ — مجوزهای کتاب‌خانه ═══ */}
           <Card className="border-border/60">
             <CardHeader className="pb-3">
               <CardTitle className="text-base flex items-center gap-2">

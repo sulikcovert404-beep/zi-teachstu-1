@@ -1,6 +1,9 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { Toaster } from "@/components/ui/toaster";
+// Round 23 — sonner toasts (actionable download errors with «دریافت از تلگرام»)
+// mounted at bottom-left so it never overlaps the shadcn toaster at bottom-right.
+import { Toaster as SonnerToaster } from "@/components/ui/sonner";
 
 export const metadata: Metadata = {
   title: "پلتفرم آموزش هوشمند ایران",
@@ -36,6 +39,7 @@ export default function RootLayout({
       <body className="font-sans antialiased bg-background text-foreground min-h-screen">
         {children}
         <Toaster />
+        <SonnerToaster dir="rtl" position="bottom-left" richColors closeButton />
       </body>
     </html>
   );

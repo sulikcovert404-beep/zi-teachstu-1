@@ -8,8 +8,10 @@ export function ok<T>(data: T, init?: ResponseInit) {
 
 export function fail(error: unknown) {
   if (error instanceof ApiError) {
+    // Round 23 — optional deepLink (e.g. oversized Telegram-stored file → t.me link)
+    const deepLink = (error as ApiError & { deepLink?: string }).deepLink;
     return NextResponse.json(
-      { error: { code: error.code, message: error.message } },
+      { error: { code: error.code, message: error.message, ...(deepLink ? { deepLink } : {}) } },
       { status: error.status }
     );
   }
