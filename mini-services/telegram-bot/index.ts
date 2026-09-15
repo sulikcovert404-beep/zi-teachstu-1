@@ -2106,18 +2106,42 @@ interface UploadWizard {
 
 const uploadSessions = new Map<number, UploadWizard>();
 
-/** ساختار درسی رسمی را از /api/v1/public/meta می‌گیرد (۱۰ دقیقه کش، پایدار در hot-reload) */
-const gMeta = globalThis as { __tgBotCurr?: { at: number; data: MetaCurriculum } };
+/** ساختار درسی رسمی را از /api/v1/public/meta می‌گیرد (۱۰ دقیقه کش، پایدار در hot-reload)
+ *  راند ۲۹: کلید کش نسخه‌دار شد (V2) تا کشِ قدیمیِ نرمال‌نشده بعد از hot-reload به کد جدید نشت نکند. */
+const gMeta = globalThis as { __tgBotCurrV2?: { at: number; data: MetaCurriculum } };
+
+/** راند ۲۹ — نرمال‌سازی ساختار درسی: هم شکل کامل ({grade, subjects}) و هم شکل قدیمی/رشته‌ای را می‌پذیرد */
+function normalizeCurriculum(raw: unknown): MetaCurriculum | null {
+  if (!Array.isArray(raw) || raw.length === 0) return null;
+  const levels = (raw as Array<Record<string, unknown>>)
+    .filter((l) => !!l && typeof l === "object" && typeof l.code === "string")
+    .map((l) => ({
+      code: l.code as string,
+      label: typeof l.label === "string" && l.label ? (l.label as string) : (l.code as string),
+      emoji: typeof l.emoji === "string" && l.emoji ? (l.emoji as string) : "🎓",
+      grades: (Array.isArray(l.grades) ? (l.grades as unknown[]) : [])
+        .map((g) => (typeof g === "string" ? { grade: g, subjects: [] as string[] } : (g as Record<string, unknown>)))
+        .filter(
+          (g): g is { grade: string; subjects: string[] } =>
+            !!g && typeof g === "object" && typeof g.grade === "string" && Array.isArray(g.subjects),
+        ),
+    }));
+  return levels.length > 0 ? { levels } : null;
+}
 
 async function getCurriculum(): Promise<MetaCurriculum | null> {
-  const cached = gMeta.__tgBotCurr;
+  const cached = gMeta.__tgBotCurrV2;
   if (cached && Date.now() - cached.at < 10 * 60_000) return cached.data;
   const res = await mainAppFetch("/api/v1/public/meta", undefined, 15_000);
   if (res && res.ok) {
-    const data = await readJson<MetaCurriculum>(res);
-    if (data?.levels?.length) {
-      gMeta.__tgBotCurr = { at: Date.now(), data };
-      return data;
+    const data = await readJson<{ curriculum?: unknown; levels?: unknown }>(res);
+    // راند ۲۹ — رفع باگ ویزارد آپلود: در meta فعلی، `levels` فقط نام پایه‌ها را دارد
+    // (آرایهٔ رشته‌ای، بدون دروس) و ساختار کامل درس‌ها در `curriculum` است.
+    // هر دو شکل نرمال‌سازی می‌شوند تا پایه‌ها و فهرست درس‌ها همیشه درست ساخته شوند.
+    const normalized = normalizeCurriculum(data?.curriculum) ?? normalizeCurriculum(data?.levels);
+    if (normalized) {
+      gMeta.__tgBotCurrV2 = { at: Date.now(), data: normalized };
+      return normalized;
     }
   }
   return cached?.data ?? null;
@@ -2307,9 +2331,11 @@ async function sendWizardGrade(w: UploadWizard): Promise<void> {
     return void (await sendWizardSubject(w));
   }
   w.grades = grades;
-  const rows: InlineKeyboard = grades.map((g, i) => [
-    { text: wizardGradeLabel(w.level, g), callback_data: `upld:gr:${i}` },
-  ]);
+  const gradeBtns = grades.map((g, i) => ({
+    text: wizardGradeLabel(w.level, g),
+    callback_data: `upld:gr:${i}`,
+  }));
+  const rows: InlineKeyboard = chunkRows(gradeBtns, 2);
   rows.push([
     { text: "↩️ اصلاح دوره", callback_data: "upld:lvl2" },
     { text: "❌ انصراف", callback_data: "upld:cancel" },
@@ -2337,9 +2363,13 @@ async function sendWizardSubject(w: UploadWizard): Promise<void> {
     { text: "❌ انصراف", callback_data: "upld:cancel" },
   ]);
   const gradeBit = w.grade ? ` — ${esc(wizardGradeLabel(w.level, w.grade))}` : "";
+  const subjectsNote =
+    subjects.length > 0
+      ? `لیست دروس ${esc(w.levelLabel ?? "")}${gradeBit} (${faNum(subjects.length)} درس) — کدام درس است؟\n(اگر در فهرست نیست، «سایر» را بزنید و نام درس را تایپ کنید)`
+      : `فهرست رسمی دروس برای ${esc(w.levelLabel ?? "")}${gradeBit} در دسترس نیست — نام درس را با «سایر (تایپ دستی)» وارد کنید.`;
   await sendMessage(
     w.chatId,
-    `📖 <b>گام ۳ از ۴ — درس</b>\n\nلیست دروس ${esc(w.levelLabel ?? "")}${gradeBit} — کدام درس است؟\n(اگر در فهرست نیست، «سایر» را بزنید و نام درس را تایپ کنید)`,
+    `📖 <b>گام ۳ از ۴ — درس</b>\n\n${subjectsNote}`,
     rows
   );
 }
