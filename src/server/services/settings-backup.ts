@@ -21,7 +21,7 @@ export interface SettingsBackup {
 
 const BACKUP_PATH = path.join(process.cwd(), "db", "settings-backup.json");
 
-let cache: SettingsBackup | null | undefined; // undefined = not loaded yet
+let cache: SettingsBackup | undefined; // undefined = not loaded yet
 
 export async function readSettingsBackup(): Promise<SettingsBackup> {
   if (cache !== undefined) return cache;

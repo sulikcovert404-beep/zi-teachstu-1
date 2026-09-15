@@ -10,11 +10,16 @@ import type { AuthContext } from "@/server/auth/session";
 // Mini App URL, and per-tenant book-upload permissions.
 // Secrets (gemini key, bot token) NEVER leave the server unmasked (spec §32).
 
+// Round 25 — فهرست ایستا به‌روز شد: گوگل ۲.۵‌ها را برای کاربران جدید بازنشسته
+// کرده است (تأیید زنده: 2.5-flash→3.6-flash؛ 2.5-pro→3.1-pro-preview).
+// این فقط «fallback» است — فهرست واقعی همیشه با دکمهٔ «دریافت از گوگل» زنده
+// گرفته می‌شود (ListModels یا آزمون مستقیم در محدودیت جغرافیایی).
 export const GEMINI_MODELS = [
-  { code: "gemini-2.5-pro", label: "جمینای ۲.۵ پرو (قوی‌ترین)" },
-  { code: "gemini-2.5-flash", label: "جمینای ۲.۵ فلش (متعادل)" },
-  { code: "gemini-2.5-flash-lite", label: "جمینای ۲.۵ فلش لایت (سریع/اقتصادی)" },
-  { code: "gemini-2.0-flash", label: "جمینای ۲.۰ فلش" },
+  { code: "gemini-3.6-flash", label: "جمینای ۳.۶ فلش (جایگزین ۲.۵ — پیشنهادی)" },
+  { code: "gemini-3.1-pro-preview", label: "جمینای ۳.۱ پرو پیش‌نمایش (قوی — جایگزین ۲.۵ پرو)" },
+  { code: "gemini-flash-latest", label: "جمینای فلش (همیشه جدیدترین)" },
+  { code: "gemini-flash-lite-latest", label: "جمینای فلش لایت (همیشه جدیدترین)" },
+  { code: "gemini-pro-latest", label: "جمینای پرو (همیشه جدیدترین)" },
 ] as const;
 
 export type GeminiModel = (typeof GEMINI_MODELS)[number]["code"];
@@ -36,7 +41,7 @@ export interface PlatformSettings {
 export const DEFAULT_SETTINGS: PlatformSettings = {
   aiProvider: "zai",
   geminiApiKey: "",
-  geminiModel: "gemini-2.5-flash",
+  geminiModel: "gemini-flash-latest", // مستعار رسمی گوگل — همیشه به جدیدترین فلش اشاره می‌کند
   telegramBotToken: "",
   telegramMiniAppUrl: "",
   telegramBotUsername: "",
@@ -59,8 +64,11 @@ const KEYS = {
   telegramStorageChatId: "telegram.storageChatId",
 } as const;
 
-function isGeminiModel(v: unknown): v is GeminiModel {
-  return typeof v === "string" && GEMINI_MODELS.some((m) => m.code === v);
+// Round 25 — کد مدل حالا «قالب‌محور» اعتبارسنجی می‌شود، نه فهرست ایستا:
+// فهرست زندهٔ گوگل (ListModels) مدل‌های جدیدی برمی‌گرداند که در GEMINI_MODELS نیستند
+// و نباید رد/بازنشانی شوند. قالب = کد شناسهٔ امن برای URL generateContent.
+function isModelCode(v: unknown): v is GeminiModel {
+  return typeof v === "string" && /^[a-zA-Z0-9][a-zA-Z0-9._-]{2,63}$/.test(v);
 }
 
 export async function getSettings(): Promise<PlatformSettings> {
@@ -117,7 +125,7 @@ export async function getSettings(): Promise<PlatformSettings> {
   return {
     aiProvider: provider === "gemini" ? "gemini" : "zai",
     geminiApiKey,
-    geminiModel: isGeminiModel(model) ? model : DEFAULT_SETTINGS.geminiModel,
+    geminiModel: isModelCode(model) ? model : DEFAULT_SETTINGS.geminiModel,
     telegramBotToken,
     telegramMiniAppUrl,
     telegramBotUsername,
@@ -203,7 +211,7 @@ export async function updateSettings(ctx: AuthContext, input: SettingsUpdateInpu
   const geminiKey = str(input.geminiApiKey);
   if (geminiKey !== undefined) patch.geminiApiKey = toJson(geminiKey);
 
-  if (input.geminiModel !== undefined && isGeminiModel(input.geminiModel)) {
+  if (input.geminiModel !== undefined && isModelCode(input.geminiModel)) {
     patch.geminiModel = toJson(input.geminiModel);
   }
 

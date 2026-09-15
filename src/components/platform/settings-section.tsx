@@ -59,6 +59,7 @@ import {
   KeyRound,
   Link2,
   Loader2,
+  RefreshCw,
   Save,
   Send,
   Server,
@@ -76,6 +77,7 @@ type AiProviderChoice = "zai" | "gemini";
 interface GeminiModelOption {
   code: string;
   label: string;
+  deprecated?: boolean; // فقط در فهرست زندهٔ گوگل پر می‌شود
 }
 
 interface PlatformSettingsView {
@@ -100,6 +102,14 @@ interface GeminiTestResult {
   ok: boolean;
   model: string;
   reply: string;
+}
+
+// Round 25 — فهرست زندهٔ مدل‌ها: ListModels رسمی یا آزمون مستقیم (محدودیت جغرافیایی)
+interface GeminiModelsResult {
+  models: GeminiModelOption[];
+  source: "list" | "probe";
+  geoRestricted: boolean;
+  noteFa?: string;
 }
 
 interface TelegramTestResult {
@@ -352,7 +362,17 @@ export function SettingsSection() {
   const [aiProvider, setAiProvider] = useState<AiProviderChoice>("zai");
   const [geminiKeyInput, setGeminiKeyInput] = useState("");
   const [showGeminiKey, setShowGeminiKey] = useState(false);
-  const [geminiModel, setGeminiModel] = useState("gemini-2.5-flash");
+  const [geminiModel, setGeminiModel] = useState("gemini-flash-latest");
+
+  // Round 25 — فهرست زندهٔ مدل‌های جمینای (از API گوگل) + وضعیت دریافت
+  const [liveModels, setLiveModels] = useState<GeminiModelOption[] | null>(null);
+  const [liveMeta, setLiveMeta] = useState<{
+    source: "list" | "probe";
+    geoRestricted: boolean;
+    noteFa?: string;
+  } | null>(null);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelsMsg, setModelsMsg] = useState<InlineMsg | null>(null);
 
   // فرم تلگرام
   const [botTokenInput, setBotTokenInput] = useState("");
@@ -422,6 +442,8 @@ export function SettingsSection() {
         if (!ignore) {
           syncAll(res);
           setLoadError(null);
+          // Round 25 — اگر کلید جمینای ذخیره شده، فهرست زندهٔ مدل‌ها را بی‌صدا بگیر
+          if (res.hasGeminiKey) void refreshGeminiModels({ key: "", silent: true });
         }
       } catch (e) {
         if (!ignore)
@@ -506,6 +528,45 @@ export function SettingsSection() {
     return e instanceof ApiClientError ? e.message : "ارتباط با سرور برقرار نشد.";
   }
 
+  // ── Round 25 — فهرست زندهٔ مدل‌های جمینای از خود API گوگل ──
+  // opts.key: کلید صریح ("" = کلید ذخیره‌شدهٔ سرور؛ undefined = از کادر ورودی)
+  async function refreshGeminiModels(opts?: { key?: string; silent?: boolean }) {
+    const key = opts && opts.key !== undefined ? opts.key : geminiKeyInput.trim();
+    setModelsLoading(true);
+    if (!opts?.silent) setModelsMsg(null);
+    try {
+      const res = await api<GeminiModelsResult>("/api/v1/platform/settings/gemini-models", {
+        method: "POST",
+        body: JSON.stringify(key ? { key } : {}),
+      });
+      setLiveModels(res.models);
+      setLiveMeta({ source: res.source, geoRestricted: res.geoRestricted, noteFa: res.noteFa });
+      setModelsMsg(null);
+    } catch (e) {
+      // به فهرست ایستای پیش‌فرض برمی‌گردیم و خطا را درون‌کارتی نشان می‌دهیم
+      setLiveModels(null);
+      setLiveMeta(null);
+      setModelsMsg({
+        kind: "error",
+        title: "دریافت فهرست مدل‌ها ناموفق بود",
+        body: <p>{errMsg(e)}</p>,
+      });
+    } finally {
+      setModelsLoading(false);
+    }
+  }
+
+  // گزینه‌های انتخاب مدل: فهرست زنده اگر گرفته شده، وگرنه فهرست ایستای پیش‌فرض؛
+  // مدلِ ذخیره‌شدهٔ فعلی حتی اگر در فهرست نباشد به‌عنوان گزینهٔ حفظ‌شده باقی می‌ماند.
+  const modelOptions = useMemo<GeminiModelOption[]>(() => {
+    const base = liveModels ?? settings?.geminiModels ?? [];
+    if (geminiModel && !base.some((m) => m.code === geminiModel)) {
+      const stale = liveModels ? " (در فهرست زنده در دسترس نیست — بهتر است جایگزین کنید)" : "";
+      return [{ code: geminiModel, label: `${geminiModel} — مدل ذخیره‌شده${stale}` }, ...base];
+    }
+    return base;
+  }, [liveModels, settings, geminiModel]);
+
   // ── هوش مصنوعی جمینای ──
 
   async function saveGemini() {
@@ -521,6 +582,8 @@ export function SettingsSection() {
         body: JSON.stringify(body),
       });
       applyScoped(res, "gemini");
+      // Round 25 — اگر کلید جدید ذخیره شد، فهرست زندهٔ مدل‌ها را با کلید جدید بگیر
+      if (geminiKeyInput.trim() !== "") void refreshGeminiModels({ key: "", silent: true });
       const providerFa = res.aiProvider === "gemini" ? "جمینای (کلید شخصی)" : "پیش‌فرض پلتفرم (zai)";
       setGeminiMsg({
         kind: "success",
@@ -982,23 +1045,77 @@ export function SettingsSection() {
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="gemini-model">مدل جمینای</Label>
-                <Select value={geminiModel} onValueChange={setGeminiModel}>
-                  <SelectTrigger id="gemini-model" className="w-full sm:w-80" aria-describedby="gemini-model-hint">
-                    <SelectValue placeholder="انتخاب مدل" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {settings.geminiModels.map((m) => (
-                      <SelectItem key={m.code} value={m.code}>
-                        {m.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <Label htmlFor="gemini-model">مدل جمینای</Label>
+                  <Badge
+                    variant={liveModels ? "outline" : "secondary"}
+                    className={
+                      liveModels
+                        ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                        : ""
+                    }
+                  >
+                    {liveModels
+                      ? `${liveMeta?.source === "probe" ? "فهرست زنده (آزمون مستقیم)" : "فهرست زندهٔ گوگل"} · ${faDigits(liveModels.length)} مدل`
+                      : "فهرست پیش‌فرض (بدون کلید)"}
+                  </Badge>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Select value={geminiModel} onValueChange={setGeminiModel}>
+                    <SelectTrigger id="gemini-model" className="w-full sm:w-80" aria-describedby="gemini-model-hint">
+                      <SelectValue placeholder="انتخاب مدل" />
+                    </SelectTrigger>
+                    <SelectContent className="max-h-72">
+                      {modelOptions.map((m) => (
+                        <SelectItem key={m.code} value={m.code}>
+                          <span className="flex flex-col items-start gap-0.5">
+                            <span className="flex items-center gap-1.5">
+                              <span>{m.label}</span>
+                              {m.deprecated && (
+                                <span
+                                  className="text-[10px] font-medium text-amber-600 dark:text-amber-400"
+                                  title="گوگل این مدل را منسوخ اعلام کرده است"
+                                >
+                                  (منسوخ)
+                                </span>
+                              )}
+                            </span>
+                            <span dir="ltr" className="font-mono text-[10px] text-muted-foreground">
+                              {m.code}
+                            </span>
+                          </span>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => void refreshGeminiModels()}
+                    disabled={modelsLoading}
+                    title="فهرست مدل‌ها را مستقیم از API گوگل با کلید شما دریافت کن (کلید تایپ‌شده یا ذخیره‌شده)"
+                    className="shrink-0"
+                  >
+                    {modelsLoading ? (
+                      <Loader2 className="animate-spin" aria-hidden />
+                    ) : (
+                      <RefreshCw aria-hidden />
+                    )}
+                    <span className="hidden sm:inline">دریافت از گوگل</span>
+                  </Button>
+                </div>
                 <p id="gemini-model-hint" className="text-xs text-muted-foreground leading-5">
-                  مدل فقط هنگام استفاده از ارائه‌دهندهٔ جمینای به کار می‌رود؛ انتخاب آن هم‌اکنون ذخیره
-                  می‌شود تا بعداً آماده باشد.
+                  فهرست مدل‌ها به‌صورت زنده از API جمینای دریافت می‌شود — با کلید ذخیره‌شده یا کلیدی که
+                  همین حالا در کادر بالا وارد کرده‌اید، حتی قبل از ذخیره. جدیدترین مدل‌ها اول فهرست‌اند و مدل‌های
+                  منسوخ برچسب می‌خورند؛ انتخاب شما هم‌اکنون ذخیره می‌شود تا ارائه‌دهندهٔ جمینای فعال باشد.
                 </p>
+                {liveMeta?.geoRestricted && liveMeta.noteFa && (
+                  <p className="text-xs text-amber-700 dark:text-amber-400 flex items-start gap-1.5 leading-5 rounded-lg border border-amber-500/30 bg-amber-500/10 p-2.5">
+                    <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" aria-hidden />
+                    <span>{liveMeta.noteFa}</span>
+                  </p>
+                )}
+                {modelsMsg && <InlineAlert msg={modelsMsg} />}
               </div>
 
               {geminiMsg && <InlineAlert msg={geminiMsg} />}

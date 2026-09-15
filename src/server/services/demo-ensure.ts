@@ -108,7 +108,7 @@ async function seedDemoData(): Promise<void> {
     data: flagKeys
       .filter((k) => !existing.has(k))
       .map((key) => ({ key, enabled: true, scope: "global", description: "کنترل قابلیت " + key.replace("feature.", "") })),
-    skipDuplicates: true,
+    // NOTE: skipDuplicates پشتیبانی SQLite ندارد؛ تکرارها بالا دستی فیلتر شده‌اند.
   });
 
   console.warn("[ensureDemoData] ✅ حساب‌های نمونه بازسازی شدند (owner/admin/teacher/student).");
