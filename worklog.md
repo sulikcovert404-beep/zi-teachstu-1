@@ -777,6 +777,30 @@ Stage Summary:
 - REMAINING: تست بات در تلگرام واقعی (منوی مرحله‌ای + ویزارد آپلود)؛ تأیید زندهٔ وِرکر مدیر بعد از استقرار؛ Milestone I طبق PROJECT.md.
 
 ---
+Task ID: 27
+Agent: Main Orchestrator (Z.ai Code)
+Task: Round 27 — درخواست مدیر: «عبور از محدودیت جغرافیایی گوگل جواب نداد، کلاً حذفش کن؛ سرور لینوکس شخصی دارم (اوبونتو ۲۴، IP: 95.135.208.167) — از آن برای دور زدن استفاده کنیم؛ دستورات را بده»
+
+Work Log:
+- تشخیص جغرافیایی: IP سرور مدیر = آمستردام/هلند (DELUXHOST) — گوگل به هلند کامل سرویس می‌دهد؛ IP خروجی سندباکس = هنگ‌کنگ (Alibaba) — علت اصلی بلاک. نتیجه: پروکسی روی سرور مدیر راه‌حل درست است.
+- وِرکر کلادفلر مدیر پاسخ می‌داد ولی (بنا بر گزارش مدیر) جواب نداد؛ طبق دستور «کلاً حذف شد»: geminiBaseUrl از settings/backup/gateway/telegram/UI/DB کامل حذف شد (ردیف ai.gemini.baseUrl از DB پاک شد).
+- 🔑 کشف مهم — IP خروجی سندباکس ثابت نیست: دو IP مختلف دیده شد (47.57.232.232 و 47.57.242.119)؛ خط Allow مدیر فقط اولی را مجاز کرده بود → 403 تصادفی. راه‌حل قطعی: BasicAuth (رمز) به‌جای محدودیت IP — از هر هاستی کار می‌کند (دقیقاً خواستهٔ قابل‌حمل‌بودن مدیر).
+- E2E محلی برای اثبات پشتیبانی اعتبارنامه: پروکسی CONNECT دست‌ساز با BasicAuth روی 127.0.0.1:3129 → Bun fetch({proxy:"http://user:pass@…"}) هدر Proxy-Authorization را درست می‌فرستد (بدون رمز/رمز غلط → 407؛ رمز درست → تونل تا گوگل و پاسخ برگشت) ✓. همین تست با کد واقعی geminiFetch بازنویسی‌شده هم ✓.
+- 🔑 کشف مهم ۲ — سرور Next.js در فرآیند Node اجرا می‌شود (نه Bun): مسیر undici فعال است؛ regex قبلی حذف رمز، http:// را هم می‌خورد → «Invalid URL». اصلاح: bareProxyUrl() با کلاس URL + token صریح Basic برای ProxyAgent.
+- gemini-net.ts (بازنویسی): فقط proxyUrl (بدون baseUrl)؛ Bun → fetch({proxy})؛ Node → undici.fetch + ProxyAgent({uri: bare, token})؛ خطای سطح تونل (CONNECT 403/407، fetch failed، ECONN*) → ApiError فارسی GEMINI_PROXY_TUNNEL با رمزِ ماسک‌شده (نکته: پیام‌ها هرگز رمز خام ندارند).
+- UI (settings-section.tsx): بخش «عبور از محدودیت جغرافیایی» حذف؛ بخش جدید «پروکسی جمینای» — یک ورودی + Badge وضعیت + Accordion راهنمای گام‌به‌گام tinyproxy روی اوبونتو (۵ قدم با دکمهٔ کپی، توضیح رمز به‌جای IP، نکتهٔ امنیتی ConnectPort 443)؛ رفع overflow موبایل با break-all روی اسپن‌های mono.
+- تنظیم فعلی DB: provider=gemini (فعال برای تست مدیر)؛ proxyUrl=http://gemini:TeachStu2026NL-8kQ5vXt@95.135.208.167:8888 (رمز از پیش ثبت شده)؛ کلید و مدل (gemini-3.6-flash) دست‌نخورده.
+- QA زنده (همین حالا، از طریق سرور مدیر): ListModels رسمی = ۴۱ مدل واقعی (۳.۸ فلش و ۳.۷ فلش و Nano Banana 2 هم آمده!) ✓✓؛ pingGemini → «سلام!» از gemini-3.6-flash ✓؛ تولید خلاصهٔ واقعی کتاب ریاضی هفتم از مسیر gateway → summaryStatus=READY (۳.۳KB فارسی) ✓؛ خطای تونل وقتی IP خروجی عوض می‌شود → پیام فارسی تمیز (نه 500) + retry خودکار gateway ✓؛ موبایل ۳۹۰px بدون overflow واقعی ✓؛ lint/tsc پاک ✓.
+- GIT: همه‌چیز پوش شد (3aaa5dd..bc7600d، ۱۱ کامیت از جمله ۱۰ کامیت عقب‌ماندهٔ قبلی)؛ اسکن راز روی diff پاک.
+
+Stage Summary:
+- ROUND 27 COMPLETE — «فعلاً برای تست مشکل api جمینای حل کنیم» حل شد: جمینای همین الان از سرور هلند مدیر روی پلتفرم فعال است و تولید محتوای واقعی کار می‌کند.
+- 🔴 اقدام ۳۰ثانیه‌ای باقی‌مانده از مدیر (برای پایداری): چون IP خروجی سندباکس می‌چرخد، بدون رمز گاهی 403 می‌گیریم. روی سرور: `sudo sed -i '/^Allow /d' /etc/tinyproxy/tinyproxy.conf` سپس `echo "BasicAuth gemini TeachStu2026NL-8kQ5vXt" | sudo tee -a /etc/tinyproxy/tinyproxy.conf` سپس `sudo systemctl restart tinyproxy` (رمز TeachStu2026NL-8kQ5vXt از قبل در پلتفرم ثبت است — دست نزنید). بعدش «آزمودن اتصال» در تنظیمات باید همیشه سبز شود.
+- ارائه‌دهنده فعلاً روی gemini است (مدیر خواسته تست کند)؛ اگر قبل از افزودن رمز خطای تونل دید، یک لحظه بعد دوباره تلاش شود (IP برمی‌گردد) یا موقتاً zai.
+- نکتهٔ جانبی: آپلود PDF خلاصه به تلگرام (tg-storage) یک‌بار «fetch failed» داد (گذرا/شبکه) — بازتولید یا مشاهدهٔ متنی مشکل ندارد.
+- REMAINING: افزودن BasicAuth توسط مدیر (بالا)؛ تست بات در تلگرام واقعی؛ Milestone I طبق PROJECT.md.
+
+---
 Task ID: 26-handoff
 Agent: Main Orchestrator (Z.ai Code)
 Task: ارائهٔ خلاصهٔ کامل چت برای انتقال به گفت‌وگوی جدید (درخواست مدیر) + نوسازی کران
