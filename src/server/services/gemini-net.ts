@@ -75,22 +75,44 @@ function maskProxyUrl(proxyUrl: string): string {
   return proxyUrl.replace(/(https?:\/\/[^:@/\s]+:)[^@/\s]+(@)/, "$1••••$2");
 }
 
-/** خطای سطح اتصال/تونل پروکسی → پیام فارسی قابل‌اقدام (رمز ماسک می‌شود) */
+/** خطای سطح اتصال/تونل/تایم‌اوت پروکسی → پیام فارسی قابل‌اقدام (رمز ماسک می‌شود) */
 function isProxyTunnelError(e: unknown): boolean {
   if (e instanceof ApiError) return false; // قبلاً ترجمه شده — دوباره wrap نشود
   const msg = e instanceof Error ? `${e.name} ${e.message}` : String(e);
-  return /tunnel|proxy|connect|ENOTFOUND|ECONNREFUSED|ECONNRESET|fetch failed/i.test(msg);
+  // «abort/timeout»: وقتی پروکسی اتصال را می‌پذیرد ولی هرگز پاسخ نمی‌دهد
+  // (مثلاً tinyproxy حین ری‌استارت یا بدون پاسخ‌گو) — این هم خطای تونل است،
+  // نه ۵۰۰ خام (در عمل رخ داد: hang بعد از ری‌استارت tinyproxy مدیر).
+  return /tunnel|proxy|connect|enotfound|econnrefused|econnreset|fetch failed|abort|timeout/i.test(msg);
+}
+
+function isProxyTimeoutError(e: unknown): boolean {
+  const msg = e instanceof Error ? `${e.name} ${e.message}` : String(e);
+  return /abort|timeout/i.test(msg);
 }
 
 function proxyTunnelFaError(proxyUrl: string, e: unknown): Error {
   const raw = e instanceof Error ? e.message.slice(0, 120) : String(e).slice(0, 120);
   // ApiError → همهٔ مسیرها (آزمون اتصال، فهرست مدل‌ها، تولید محتوا) پیام فارسی
   // قابل‌اقدام را با کد GEMINI_PROXY_TUNNEL می‌بینند، نه ۵۰۰ خام.
+  const head = isProxyTimeoutError(e)
+    ? `پاسخی از پروکسی در زمان معقول نگرفتیم (تایم‌اوت — پروکسی اتصال را می‌پذیرد ولی پاسخ نمی‌دهد). ` +
+      `اگر همین چند دقیقه پیش سرویس پروکسی را ری‌استارت کرده‌اید چند لحظه صبر کنید و دوباره تلاش کنید؛ ` +
+      `اگر تکرار شد، روی سرور پروکسی وضعیت سرویس را ببینید (مثلاً sudo systemctl status tinyproxy و sudo systemctl restart tinyproxy). `
+    : `علت‌های محتمل: رمز پروکسی اشتباه است (خطای ۴۰۷)، پروکسی هنوز با BasicAuth راه‌اندازی نشده، سرویس پروکسی خاموش است، یا فایروال پورت را بسته است. `;
   return Errors.conflict(
     "GEMINI_PROXY_TUNNEL",
-    `اتصال از طریق پروکسی جمینای برقرار نشد (${maskProxyUrl(proxyUrl)}). ` +
-      `علت‌های محتمل: رمز پروکسی اشتباه است (خطای ۴۰۷)، پروکسی هنوز با BasicAuth راه‌اندازی نشده، سرویس پروکسی خاموش است، یا فایروال پورت را بسته است. ` +
-      `جزئیات فنی: ${raw}`
+    `اتصال از طریق پروکسی جمینای برقرار نشد (${maskProxyUrl(proxyUrl)}). ` + head + `جزئیات فنی: ${raw}`
+  );
+}
+
+/** خطای راه‌اندازی مسیر پروکسی (آدرس خراب و…) — نه ۵۰۰ خام، پیام فارسی قابل‌اقدام */
+function proxySetupFaError(e: unknown): Error {
+  const raw = e instanceof Error ? e.message.slice(0, 80) : "خطای ناشناخته";
+  return Errors.conflict(
+    "GEMINI_PROXY_UNAVAILABLE",
+    `راه‌اندازی مسیر پروکسی جمینای ممکن نشد — ${raw}. ` +
+      `اگر آدرس پروکسی را تازه تغییر داده‌اید، آن را بدون علامت نقل‌قول ذخیره کنید ` +
+      `(مثال درست: http://user:pass@host:8888) و دوباره تلاش کنید.`
   );
 }
 
@@ -114,9 +136,10 @@ export async function geminiFetch(
     try {
       return await fetch(url, { ...init, proxy: transport.proxyUrl } as RequestInit & { proxy: string });
     } catch (e) {
-      // خطای سطح تونل (مثلاً CONNECT 403/407) نباید به‌صورت 500 خام برسد
+      // خطای سطح تونل (مثلاً CONNECT 403/407) یا تایم‌اوتِ پروکسیِ بی‌پاسخ،
+      // نباید به‌صورت ۵۰۰ خام برسد — پیام فارسی قابل‌اقدام بده.
       if (isProxyTunnelError(e)) throw proxyTunnelFaError(transport.proxyUrl, e);
-      throw e;
+      throw proxySetupFaError(e);
     }
   }
   // Node: undici.fetch (خود بسته) + ProxyAgent — fetch سراسری dispatcher را نمی‌پذیرد
@@ -131,10 +154,6 @@ export async function geminiFetch(
     return (await undici.fetch(url, { ...init, dispatcher: agent })) as Response;
   } catch (e) {
     if (isProxyTunnelError(e)) throw proxyTunnelFaError(transport.proxyUrl, e);
-    throw new Error(
-      `GEMINI_PROXY_UNAVAILABLE: پروکسی جمینای در این محیط قابل راه‌اندازی نیست — ${
-        e instanceof Error ? e.message.slice(0, 80) : "خطای ناشناخته"
-      }. اگر روی Node اجرا می‌کنید، بستهٔ undici نصب باشد.`
-    );
+    throw proxySetupFaError(e);
   }
 }

@@ -193,7 +193,19 @@ export interface SettingsUpdateInput {
 
 function str(v: unknown): string | undefined {
   if (v === undefined) return undefined;
-  return typeof v === "string" ? v.trim() : undefined;
+  if (typeof v !== "string") return undefined;
+  const t = v.trim();
+  // Round 27 — مقدار چسبیده به نقل‌قول (کپی از JSON/راهنما) باید کوت شود؛
+  // وگرنه «Invalid URL» در پروکسی و «API key not valid» در گوگل می‌دهد و
+  // کاربر را سردرگم می‌کند (در عمل رخ داد: آدرس پروکسی داخل " " ذخیره شد).
+  if (t.length >= 2) {
+    const first = t[0];
+    const last = t[t.length - 1];
+    if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+      return t.slice(1, -1).trim();
+    }
+  }
+  return t;
 }
 
 function idArray(v: unknown): string[] | undefined {
@@ -231,9 +243,16 @@ export async function updateSettings(ctx: AuthContext, input: SettingsUpdateInpu
   // Proxy-Authorization تبدیل می‌کنند) — با پروکسی واقعی BasicAuth E2E تأیید شد.
   const proxyUrl = str(input.geminiProxyUrl);
   if (proxyUrl !== undefined) {
-    if (proxyUrl !== "" && !/^https?:\/\/[a-zA-Z0-9.:@\[\]-]+(:\d+)?(\/\S*)?$/i.test(proxyUrl)) {
+    let parseOk = false;
+    try {
+      new URL(proxyUrl);
+      parseOk = true;
+    } catch {
+      parseOk = false;
+    }
+    if (proxyUrl !== "" && (!parseOk || !/^https?:\/\//i.test(proxyUrl))) {
       throw Errors.validation(
-        "آدرس پروکسی جمینای باید با http:// یا https:// شروع شود (مثلاً http://user:pass@95.135.208.167:8888). پروکسی SOCKS پشتیبانی نمی‌شود."
+        "آدرس پروکسی جمینای باید یک آدرس http کامل و معتبر باشد (مثلاً http://user:pass@95.135.208.167:8888). پروکسی SOCKS پشتیبانی نمی‌شود و نباید داخل نقل‌قول باشد."
       );
     }
     patch.geminiProxyUrl = toJson(proxyUrl);
