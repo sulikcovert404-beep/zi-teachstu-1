@@ -75,8 +75,8 @@ async function callProvider(req: AIRequest, signal: AbortSignal): Promise<string
 // (systemPrompt, history, userMessage) → text. REST generateContent with
 // x-goog-api-key header (key never logged, never returned). Roles map 1:1
 // (assistant→model) per the Gemini contents schema.
-// Round 26 — تمام ترافیک از geminiFetch می‌گذرد: میان‌کار (Cloudflare Worker)
-// یا پروکسی HTTP در صورت تنظیم، بدون دست‌زدن به کد و در هر میزبانی.
+// Round 27 — تمام ترافیک از geminiFetch می‌گذرد: پروکسی HTTP (با احراز هویت)
+// در صورت تنظیم، بدون دست‌زدن به کد و در هر میزبانی.
 async function callGemini(
   req: AIRequest,
   apiKey: string,
@@ -146,7 +146,7 @@ export async function aiComplete(req: AIRequest): Promise<AIResponse> {
             providerConfig.apiKey,
             providerConfig.model,
             controller.signal,
-            { baseUrl: providerConfig.baseUrl, proxyUrl: providerConfig.proxyUrl }
+            { proxyUrl: providerConfig.proxyUrl }
           )
         : await callProvider(req, controller.signal);
       clearTimeout(timer);

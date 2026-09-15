@@ -12,9 +12,8 @@ export interface SettingsBackup {
   aiProvider?: string;
   geminiApiKey?: string;
   geminiModel?: string;
-  // Round 26 — تنظیمات خروج شبکهٔ جمینای (میان‌کار/پروکسی)؛ راز نیستند اما
-  // برای مهاجرت بین میزبان‌ها حیاتی‌اند — همراه بقیه در آینه نگه داشته می‌شوند.
-  geminiBaseUrl?: string;
+  // Round 27 — پروکسی خروجی جمینای؛ برای مهاجرت بین میزبان‌ها حیاتی است —
+  // همراه بقیه در آینه نگه داشته می‌شود (ممکن است شامل رمز پروکسی باشد).
   geminiProxyUrl?: string;
   telegramBotToken?: string;
   telegramMiniAppUrl?: string;
@@ -58,7 +57,6 @@ export function pickBackupValues(s: {
   aiProvider: string;
   geminiApiKey: string;
   geminiModel: string;
-  geminiBaseUrl: string;
   geminiProxyUrl: string;
   telegramBotToken: string;
   telegramMiniAppUrl: string;
@@ -70,7 +68,6 @@ export function pickBackupValues(s: {
     aiProvider: s.aiProvider || "zai",
     geminiApiKey: s.geminiApiKey ?? "",
     geminiModel: s.geminiModel || "gemini-flash-latest",
-    geminiBaseUrl: s.geminiBaseUrl ?? "",
     geminiProxyUrl: s.geminiProxyUrl ?? "",
     telegramBotToken: s.telegramBotToken ?? "",
     telegramMiniAppUrl: s.telegramMiniAppUrl ?? "",

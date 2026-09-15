@@ -28,9 +28,9 @@ export interface PlatformSettings {
   aiProvider: "zai" | "gemini";
   geminiApiKey: string;
   geminiModel: GeminiModel;
-  // Round 26 — عبور از محدودیت جغرافیایی گوگل (قابل تغییر در هر میزبانی، بدون کد):
-  geminiBaseUrl: string; // آدرس میان‌کار/آینه (مثلاً Cloudflare Worker) — "" = نقطهٔ رسمی گوگل
-  geminiProxyUrl: string; // پروکسی HTTP(S) خروجی — "" = اتصال مستقیم
+  // Round 27 — پروکسی HTTP خروجی جمینای (مثلاً http://user:pass@host:port روی سرور
+  // مدیر در کشورهای مجاز گوگل) — "" = اتصال مستقیم. قابل تغییر در هر میزبانی، بدون کد.
+  geminiProxyUrl: string;
   telegramBotToken: string;
   telegramMiniAppUrl: string;
   telegramBotUsername: string; // cached from getMe
@@ -45,7 +45,6 @@ export const DEFAULT_SETTINGS: PlatformSettings = {
   aiProvider: "zai",
   geminiApiKey: "",
   geminiModel: "gemini-flash-latest", // مستعار رسمی گوگل — همیشه به جدیدترین فلش اشاره می‌کند
-  geminiBaseUrl: "",
   geminiProxyUrl: "",
   telegramBotToken: "",
   telegramMiniAppUrl: "",
@@ -60,7 +59,6 @@ const KEYS = {
   aiProvider: "ai.provider",
   geminiApiKey: "ai.gemini.apiKey",
   geminiModel: "ai.gemini.model",
-  geminiBaseUrl: "ai.gemini.baseUrl",
   geminiProxyUrl: "ai.gemini.proxyUrl",
   telegramBotToken: "telegram.botToken",
   telegramMiniAppUrl: "telegram.miniAppUrl",
@@ -91,7 +89,6 @@ export async function getSettings(): Promise<PlatformSettings> {
   let telegramBotToken = g<string>(KEYS.telegramBotToken, "");
   let telegramMiniAppUrl = g<string>(KEYS.telegramMiniAppUrl, "");
   let telegramBotUsername = g<string>(KEYS.telegramBotUsername, "");
-  const geminiBaseUrl = g<string>(KEYS.geminiBaseUrl, "");
   const geminiProxyUrl = g<string>(KEYS.geminiProxyUrl, "");
 
   // ── Round 24/26 — Self-heal from the file mirror ──
@@ -137,7 +134,6 @@ export async function getSettings(): Promise<PlatformSettings> {
     aiProvider: provider === "gemini" ? "gemini" : "zai",
     geminiApiKey,
     geminiModel: isModelCode(model) ? model : DEFAULT_SETTINGS.geminiModel,
-    geminiBaseUrl,
     geminiProxyUrl,
     telegramBotToken,
     telegramMiniAppUrl,
@@ -164,7 +160,6 @@ export async function getSettingsForClient(): Promise<
   return {
     aiProvider: s.aiProvider,
     geminiModel: s.geminiModel,
-    geminiBaseUrl: s.geminiBaseUrl,
     geminiProxyUrl: s.geminiProxyUrl,
     telegramMiniAppUrl: s.telegramMiniAppUrl,
     telegramBotUsername: s.telegramBotUsername,
@@ -187,7 +182,6 @@ export interface SettingsUpdateInput {
   aiProvider?: unknown;
   geminiApiKey?: unknown; // undefined = keep; "" = clear; string = replace
   geminiModel?: unknown;
-  geminiBaseUrl?: unknown; // "" = نقطهٔ رسمی گوگل
   geminiProxyUrl?: unknown; // "" = مستقیم
   telegramBotToken?: unknown; // same semantics
   telegramMiniAppUrl?: unknown;
@@ -232,22 +226,14 @@ export async function updateSettings(ctx: AuthContext, input: SettingsUpdateInpu
     patch.geminiModel = toJson(input.geminiModel);
   }
 
-  // Round 26 — میان‌کار/پروکسی جمینای (اعتبارسنجی سخت‌گیرانه؛ مقادیر خالی = مستقیم به گوگل)
-  const baseUrl = str(input.geminiBaseUrl);
-  if (baseUrl !== undefined) {
-    if (baseUrl !== "" && !/^https?:\/\/[a-zA-Z0-9.:-]+(\/\S*)?$/i.test(baseUrl)) {
-      throw Errors.validation(
-        "آدرس میان‌کار جمینای باید با http:// یا https:// شروع شود (مثلاً https://my-worker.workers.dev)."
-      );
-    }
-    patch.geminiBaseUrl = toJson(baseUrl.replace(/\/+$/, ""));
-  }
-
+  // Round 27 — پروکسی جمینای (اعتبارسنجی سخت‌گیرانه؛ مقدار خالی = مستقیم به گوگل).
+  // اعتبارنامهٔ user:pass در آدرس مجاز است (Bun/undici آن را به هدر
+  // Proxy-Authorization تبدیل می‌کنند) — با پروکسی واقعی BasicAuth E2E تأیید شد.
   const proxyUrl = str(input.geminiProxyUrl);
   if (proxyUrl !== undefined) {
-    if (proxyUrl !== "" && !/^https?:\/\/\S+$/i.test(proxyUrl)) {
+    if (proxyUrl !== "" && !/^https?:\/\/[a-zA-Z0-9.:@\[\]-]+(:\d+)?(\/\S*)?$/i.test(proxyUrl)) {
       throw Errors.validation(
-        "آدرس پروکسی جمینای باید با http:// یا https:// شروع شود (مثلاً http://user:pass@host:port). پروکسی SOCKS پشتیبانی نمی‌شود."
+        "آدرس پروکسی جمینای باید با http:// یا https:// شروع شود (مثلاً http://user:pass@95.135.208.167:8888). پروکسی SOCKS پشتیبانی نمی‌شود."
       );
     }
     patch.geminiProxyUrl = toJson(proxyUrl);
@@ -324,7 +310,7 @@ export async function updateSettings(ctx: AuthContext, input: SettingsUpdateInpu
 
 // Effective AI provider resolution for the gateway (spec §10 — selection lives here).
 export async function resolveAiProvider(): Promise<
-  | { provider: "gemini"; apiKey: string; model: string; baseUrl: string; proxyUrl: string }
+  | { provider: "gemini"; apiKey: string; model: string; proxyUrl: string }
   | { provider: "zai" }
 > {
   const s = await getSettings();
@@ -333,7 +319,6 @@ export async function resolveAiProvider(): Promise<
       provider: "gemini",
       apiKey: s.geminiApiKey,
       model: s.geminiModel,
-      baseUrl: s.geminiBaseUrl.replace(/\/+$/, "") || "https://generativelanguage.googleapis.com",
       proxyUrl: s.geminiProxyUrl.trim(),
     };
   }

@@ -127,7 +127,7 @@ export async function pingGemini(): Promise<{ ok: true; model: string; reply: st
   if (cfg.provider !== "gemini" || !cfg.apiKey) {
     throw Errors.validation("ابتدا کلید API جمینای را ذخیره و ارائه‌دهنده را روی جمینای تنظیم کنید.");
   }
-  // Round 26 — از مسیر مرکزی (میان‌کار/پروکسی در صورت تنظیم) عبور می‌کند
+  // Round 27 — از مسیر مرکزی (پروکسی در صورت تنظیم) عبور می‌کند
   const res = await geminiFetch(
     `/v1beta/models/${encodeURIComponent(cfg.model)}:generateContent`,
     {
@@ -139,7 +139,7 @@ export async function pingGemini(): Promise<{ ok: true; model: string; reply: st
       }),
       signal: AbortSignal.timeout(30_000),
     },
-    { baseUrl: cfg.baseUrl, proxyUrl: cfg.proxyUrl }
+    { proxyUrl: cfg.proxyUrl }
   );
   const json = (await res.json().catch(() => null)) as {
     candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
@@ -149,15 +149,15 @@ export async function pingGemini(): Promise<{ ok: true; model: string; reply: st
     const msg = json?.error?.message ?? `HTTP ${res.status}`;
     // Round 25 — تشخیص محدودیت جغرافیایی: کلید معتبر است اما گوگل موقعیت IP
     // این سرور را نمی‌پذیرد؛ توضیح فارسی دقیق به‌جای پیام خام گوگل.
-    // Round 26 — حالا راه‌حل واقعی هم داریم: میان‌کار/پروکسی در تنظیمات.
+    // Round 27 — راه‌حل: پروکسی HTTP (مثلاً سرور شخصی در کشورهای مجاز).
     if (/user location is not supported/i.test(msg)) {
-      const via = cfg.baseUrl !== "https://generativelanguage.googleapis.com" || cfg.proxyUrl;
+      const via = cfg.proxyUrl;
       throw Errors.conflict(
         "GEMINI_GEO_BLOCKED",
         "کلید شما معتبر است اما گوگل اجازهٔ استفاده از موقعیت جغرافیایی این سرور را نمی‌دهد (محدودیت منطقه‌ای API). " +
           (via
-            ? "این خطا با میان‌کار/پروکسی فعلی هم برطرف نشد — آدرس میان‌کار یا پروکسی را در «تنظیمات و اتصال‌ها» بررسی کنید (مثلاً وِرکر باید در کشورهای مجاز باشد)."
-            : "راه‌حل: در «تنظیمات و اتصال‌ها ← عبور از محدودیت جغرافیایی» یک آدرس میان‌کار (Cloudflare Worker رایگان — کد آماده در همان صفحه) یا پروکسی HTTP تنظیم کنید. پیشنهاد دیگر: ارائه‌دهندهٔ پیش‌فرض zai.")
+            ? "این خطا با پروکسی فعلی هم برطرف نشد — آدرس پروکسی را در «تنظیمات و اتصال‌ها ← پروکسی جمینای» بررسی کنید (پروکسی باید در کشورهای مجاز گوگل باشد و رمز آن درست وارد شده باشد)."
+            : "راه‌حل: در «تنظیمات و اتصال‌ها ← پروکسی جمینای» یک پروکسی HTTP در کشورهای مجاز (مثلاً سرور شخصی شما با tinyproxy — راهنمای گام‌به‌گام همان‌جاست) تنظیم کنید. پیشنهاد دیگر: ارائه‌دهندهٔ پیش‌فرض zai.")
       );
     }
     throw Errors.conflict("GEMINI_TEST_FAILED", `آزمون اتصال جمینای ناموفق بود: ${msg.slice(0, 160)}`);
@@ -261,7 +261,7 @@ export async function listGeminiModels(
   apiKey: string,
   tr?: GeminiTransport
 ): Promise<GeminiModelsResult> {
-  // Round 26 — حمل‌ونقل (میان‌کار/پروکسی): اگر داده نشد از تنظیمات خوانده می‌شود؛
+  // Round 27 — حمل‌ونقل (پروکسی با احراز هویت): اگر داده نشد از تنظیمات خوانده می‌شود؛
   // مسیر آزمون مستقیم هم از همان مسیر می‌رود تا فهرست با شرایط واقعی تولید یکی باشد.
   const transport = tr ?? (await geminiTransportOf());
 
@@ -327,7 +327,7 @@ export async function listGeminiModels(
     source: "probe",
     geoRestricted: geoHit, // دست‌کم یک مدلِ موجود با خطای محدودیت جغرافیایی پاسخ داد
     noteFa: geoHit
-      ? "گوگل فهرست رسمی مدل‌ها (ListModels) را برای موقعیت جغرافیایی این سرور بسته است؛ فهرست بالا با «آزمون مستقیم» هر مدل ساخته شده و همهٔ آن‌ها برای کلید شما در دسترس‌اند. توجه: تولید محتوا با جمینای نیز ممکن است از همین محدودیت متأثر شود — برای رفع آن، در «عبور از محدودیت جغرافیایی» پایین همین صفحه یک آدرس میان‌کار (Cloudflare Worker رایگان) یا پروکسی HTTP تنظیم کنید؛ یا ارائه‌دهندهٔ پیش‌فرض zai را فعال نگه دارید."
+      ? "گوگل فهرست رسمی مدل‌ها (ListModels) را برای موقعیت جغرافیایی این سرور بسته است؛ فهرست بالا با «آزمون مستقیم» هر مدل ساخته شده و همهٔ آن‌ها برای کلید شما در دسترس‌اند. توجه: تولید محتوا با جمینای نیز ممکن است از همین محدودیت متأثر شود — برای رفع آن، در «پروکسی جمینای» پایین همین صفحه یک پروکسی HTTP در کشورهای مجاز (مثلاً سرور شخصی شما — راهنمای گام‌به‌گام همان‌جاست) تنظیم کنید؛ یا ارائه‌دهندهٔ پیش‌فرض zai را فعال نگه دارید."
       : "فهرست رسمی مدل‌ها برای موقعیت این سرور در دسترس نبود؛ این فهرست با «آزمون مستقیم» هر مدل ساخته شده است.",
   };
 }
