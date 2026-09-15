@@ -12,6 +12,10 @@ export interface SettingsBackup {
   aiProvider?: string;
   geminiApiKey?: string;
   geminiModel?: string;
+  // Round 26 — تنظیمات خروج شبکهٔ جمینای (میان‌کار/پروکسی)؛ راز نیستند اما
+  // برای مهاجرت بین میزبان‌ها حیاتی‌اند — همراه بقیه در آینه نگه داشته می‌شوند.
+  geminiBaseUrl?: string;
+  geminiProxyUrl?: string;
   telegramBotToken?: string;
   telegramMiniAppUrl?: string;
   telegramBotUsername?: string;
@@ -45,25 +49,33 @@ export async function writeSettingsBackup(backup: SettingsBackup): Promise<void>
   }
 }
 
-// Merge helper: keep only defined, non-empty values worth persisting.
+// راند ۲۶ — همهٔ فیلدهای حیاتی «همیشه» با آخرین وضعیت ذخیره می‌شوند (حتی خالی).
+// قبلاً مقادیر خالی نوشته نمی‌شدند و پاک‌کردن عمدیِ کلید/توکن در آینه می‌ماند؛
+// بعد از پاک‌شدن دیتابیس، مقدار قدیمی به‌صورت غلط بازگردانده می‌شد.
+// معیار بازگردانی در getSettings «نبودِ ردیف» است، پس مقدار خالیِ آینه یعنی
+// «مدیر عمداً پاک کرده» — همین که باید باشد.
 export function pickBackupValues(s: {
   aiProvider: string;
   geminiApiKey: string;
   geminiModel: string;
+  geminiBaseUrl: string;
+  geminiProxyUrl: string;
   telegramBotToken: string;
   telegramMiniAppUrl: string;
   telegramBotUsername: string;
   telegramStorageEnabled: boolean;
   telegramStorageChatId: string;
 }): SettingsBackup {
-  const out: SettingsBackup = {};
-  if (s.aiProvider) out.aiProvider = s.aiProvider;
-  if (s.geminiApiKey) out.geminiApiKey = s.geminiApiKey;
-  if (s.geminiModel) out.geminiModel = s.geminiModel;
-  if (s.telegramBotToken) out.telegramBotToken = s.telegramBotToken;
-  if (s.telegramMiniAppUrl) out.telegramMiniAppUrl = s.telegramMiniAppUrl;
-  if (s.telegramBotUsername) out.telegramBotUsername = s.telegramBotUsername;
-  out.telegramStorageEnabled = s.telegramStorageEnabled;
-  if (s.telegramStorageChatId) out.telegramStorageChatId = s.telegramStorageChatId;
-  return out;
+  return {
+    aiProvider: s.aiProvider || "zai",
+    geminiApiKey: s.geminiApiKey ?? "",
+    geminiModel: s.geminiModel || "gemini-flash-latest",
+    geminiBaseUrl: s.geminiBaseUrl ?? "",
+    geminiProxyUrl: s.geminiProxyUrl ?? "",
+    telegramBotToken: s.telegramBotToken ?? "",
+    telegramMiniAppUrl: s.telegramMiniAppUrl ?? "",
+    telegramBotUsername: s.telegramBotUsername ?? "",
+    telegramStorageEnabled: s.telegramStorageEnabled,
+    telegramStorageChatId: s.telegramStorageChatId ?? "",
+  };
 }

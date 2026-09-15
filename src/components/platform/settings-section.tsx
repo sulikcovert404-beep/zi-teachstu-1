@@ -54,12 +54,14 @@ import {
   ExternalLink,
   Eye,
   EyeOff,
+  Globe,
   GraduationCap,
   Info,
   KeyRound,
   Link2,
   Loader2,
   RefreshCw,
+  Route,
   Save,
   Send,
   Server,
@@ -83,6 +85,9 @@ interface GeminiModelOption {
 interface PlatformSettingsView {
   aiProvider: AiProviderChoice;
   geminiModel: string;
+  // Round 26 — عبور از محدودیت جغرافیایی: میان‌کار/پروکسی جمینای
+  geminiBaseUrl: string;
+  geminiProxyUrl: string;
   telegramMiniAppUrl: string;
   telegramBotUsername: string;
   // Round 23 — ذخیره‌سازی کامل در تلگرام (raw fields + rich status block)
@@ -130,6 +135,24 @@ interface InlineMsg {
   title: string;
   body?: ReactNode;
 }
+
+// ── Round 26 — کد آمادهٔ وِرکر کلادفلر برای میان‌کار جمینای ──
+// قابل کپی در UI؛ خروجی کلادفلر از کشورهای مجاز گوگل است، پس محدودیت
+// جغرافیایی سرور اصلی عملاً دور می‌خورد — رایگان و بدون کارت اعتباری.
+const CLOUDFLARE_WORKER_CODE = `// 🌍 میان‌کار API جمینای — Cloudflare Worker (رایگان)
+// ۱) dash.cloudflare.com → Workers & Pages → Create application → Create Worker
+// ۲) نام دلخواه بدهید → Deploy → Edit code → کد پیش‌فرض را با همین کد جایگزین کنید → Deploy
+// ۳) آدرس وِرکر را کپی کنید (https://NAME.YOUR-SUBDOMAIN.workers.dev)
+//    و در «آدرس میان‌کار جمینای» در تنظیمات پلتفرم وارد کنید.
+export default {
+  async fetch(request) {
+    const url = new URL(request.url);
+    url.hostname = "generativelanguage.googleapis.com";
+    const upstream = new Request(url, request);
+    upstream.headers.set("host", "generativelanguage.googleapis.com");
+    return fetch(upstream);
+  },
+};`;
 
 // ── ابزارهای کمکی ──
 
@@ -363,6 +386,9 @@ export function SettingsSection() {
   const [geminiKeyInput, setGeminiKeyInput] = useState("");
   const [showGeminiKey, setShowGeminiKey] = useState(false);
   const [geminiModel, setGeminiModel] = useState("gemini-flash-latest");
+  // Round 26 — میان‌کار/پروکسی جمینای
+  const [geminiBaseUrl, setGeminiBaseUrl] = useState("");
+  const [geminiProxyUrl, setGeminiProxyUrl] = useState("");
 
   // Round 25 — فهرست زندهٔ مدل‌های جمینای (از API گوگل) + وضعیت دریافت
   const [liveModels, setLiveModels] = useState<GeminiModelOption[] | null>(null);
@@ -405,6 +431,8 @@ export function SettingsSection() {
     setAiProvider(res.aiProvider === "gemini" ? "gemini" : "zai");
     setGeminiModel(res.geminiModel);
     setGeminiKeyInput("");
+    setGeminiBaseUrl(res.geminiBaseUrl ?? "");
+    setGeminiProxyUrl(res.geminiProxyUrl ?? "");
     setMiniAppUrl(res.telegramMiniAppUrl);
     setBotTokenInput("");
     setTgChatIdInput(res.telegramStorageChatId ?? "");
@@ -421,6 +449,8 @@ export function SettingsSection() {
         setAiProvider(res.aiProvider === "gemini" ? "gemini" : "zai");
         setGeminiModel(res.geminiModel);
         setGeminiKeyInput("");
+        setGeminiBaseUrl(res.geminiBaseUrl ?? "");
+        setGeminiProxyUrl(res.geminiProxyUrl ?? "");
       } else if (scope === "telegram") {
         setMiniAppUrl(res.telegramMiniAppUrl);
         setBotTokenInput("");
@@ -485,8 +515,10 @@ export function SettingsSection() {
       !!settings &&
       (aiProvider !== settings.aiProvider ||
         geminiModel !== settings.geminiModel ||
-        geminiKeyInput.trim() !== ""),
-    [settings, aiProvider, geminiModel, geminiKeyInput]
+        geminiKeyInput.trim() !== "" ||
+        geminiBaseUrl.trim() !== (settings.geminiBaseUrl ?? "") ||
+        geminiProxyUrl.trim() !== (settings.geminiProxyUrl ?? "")),
+    [settings, aiProvider, geminiModel, geminiKeyInput, geminiBaseUrl, geminiProxyUrl]
   );
 
   const telegramDirty = useMemo(
@@ -577,6 +609,9 @@ export function SettingsSection() {
       const body: Record<string, unknown> = { aiProvider, geminiModel };
       const key = geminiKeyInput.trim();
       if (key !== "") body.geminiApiKey = key;
+      // Round 26 — مسیر جایگزین شبکهٔ جمینای (خالی = مستقیم به گوگل)
+      body.geminiBaseUrl = geminiBaseUrl.trim();
+      body.geminiProxyUrl = geminiProxyUrl.trim();
       const res = await api<PlatformSettingsView>("/api/v1/platform/settings", {
         method: "PUT",
         body: JSON.stringify(body),
@@ -1116,6 +1151,147 @@ export function SettingsSection() {
                   </p>
                 )}
                 {modelsMsg && <InlineAlert msg={modelsMsg} />}
+              </div>
+
+              {/* ═══ Round 26 — عبور از محدودیت جغرافیایی (میان‌کار / پروکسی) ═══ */}
+              <div className="space-y-3 rounded-xl border border-border/70 bg-muted/20 p-4">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <div className="flex items-center gap-2">
+                    <Globe className="h-4.5 w-4.5 text-primary" aria-hidden />
+                    <div>
+                      <p className="text-sm font-bold leading-5">عبور از محدودیت جغرافیایی گوگل</p>
+                      <p className="text-[11px] text-muted-foreground leading-4">
+                        مسیر جایگزین شبکهٔ جمینای — روی هر میزبانی، بدون تغییر کد
+                      </p>
+                    </div>
+                  </div>
+                  <Badge
+                    variant="outline"
+                    className={
+                      (settings.geminiBaseUrl ?? "") !== "" || (settings.geminiProxyUrl ?? "") !== ""
+                        ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                        : ""
+                    }
+                  >
+                    {(settings.geminiBaseUrl ?? "") !== "" ? (
+                      <span className="flex items-center gap-1">
+                        <Route className="h-3 w-3" aria-hidden /> میان‌کار فعال
+                      </span>
+                    ) : (settings.geminiProxyUrl ?? "") !== "" ? (
+                      <span className="flex items-center gap-1">
+                        <Route className="h-3 w-3" aria-hidden /> پروکسی فعال
+                      </span>
+                    ) : (
+                      "اتصال مستقیم به گوگل"
+                    )}
+                  </Badge>
+                </div>
+
+                <p className="text-xs text-muted-foreground leading-5">
+                  اگر آزمودن اتصال با خطای «موقعیت جغرافیایی پشتیبانی نمی‌شود» رد شود، یعنی گوگل IP
+                  میزبان شما را نمی‌پذیرد. با یکی از دو راه زیر، ترافیک جمینای از مسیری در کشورهای مجاز
+                  عبور می‌کند؛ کلید و مدل شما دست‌نخورده می‌ماند و بعد از انتقال به هاست دیگر هم فقط همین
+                  بخش را تغییر دهید.
+                </p>
+
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="gemini-base-url">آدرس میان‌کار جمینای (پیشنهادی)</Label>
+                    <Input
+                      id="gemini-base-url"
+                      dir="ltr"
+                      type="url"
+                      spellCheck={false}
+                      value={geminiBaseUrl}
+                      onChange={(e) => setGeminiBaseUrl(e.target.value)}
+                      placeholder="https://my-gemini-mirror.workers.dev"
+                      className="text-left font-mono text-sm"
+                      aria-describedby="gemini-base-url-hint"
+                    />
+                    <p id="gemini-base-url-hint" className="text-[11px] text-muted-foreground leading-4">
+                      یک Cloudflare Worker رایگان که درخواست‌ها را به گوگل می‌رساند (کد آمادهٔ کپی
+                      پایین). خالی = نقطهٔ رسمی گوگل.
+                    </p>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="gemini-proxy-url">آدرس پروکسی HTTP(S) — جایگزین</Label>
+                    <Input
+                      id="gemini-proxy-url"
+                      dir="ltr"
+                      type="url"
+                      spellCheck={false}
+                      value={geminiProxyUrl}
+                      onChange={(e) => setGeminiProxyUrl(e.target.value)}
+                      placeholder="http://user:pass@proxy-host:port"
+                      className="text-left font-mono text-sm"
+                      aria-describedby="gemini-proxy-url-hint"
+                    />
+                    <p id="gemini-proxy-url-hint" className="text-[11px] text-muted-foreground leading-4">
+                      پروکسی HTTP خارج از منطقهٔ محدود. خالی = بدون پروکسی. (پروکسی SOCKS پشتیبانی
+                      نمی‌شود؛ با gost یا privoxy به HTTP تبدیل کنید.)
+                    </p>
+                  </div>
+                </div>
+
+                <p className="text-[11px] text-muted-foreground leading-4">
+                  پس از «ذخیرهٔ تنظیمات»، هر دو دکمهٔ «دریافت از گوگل» و «آزمودن اتصال» و تولید همهٔ
+                  محتواهای جمینای از مسیر جدید عبور می‌کنند.
+                </p>
+
+                <Accordion type="single" collapsible className="w-full">
+                  <AccordionItem value="worker" className="border-border/60">
+                    <AccordionTrigger className="text-xs py-2 hover:no-underline">
+                      <span className="flex items-center gap-1.5 text-right">
+                        <Cloud className="h-3.5 w-3.5 text-sky-500" aria-hidden />
+                        راهنمای گام‌به‌گام ساخت میان‌کار رایگان (Cloudflare Worker) + کد آماده
+                      </span>
+                    </AccordionTrigger>
+                    <AccordionContent className="space-y-2.5">
+                      <ol className="list-decimal pr-5 space-y-1.5 text-xs text-muted-foreground leading-5">
+                        <li>
+                          در <span dir="ltr">dash.cloudflare.com</span> حساب رایگان بسازید (بدون نیاز به
+                          کارت اعتباری) و به بخش{" "}
+                          <span dir="ltr">Workers &amp; Pages</span> بروید.
+                        </li>
+                        <li>
+                          <span dir="ltr">Create application → Create Worker</span> را بزنید، نام دلخواه
+                          بدهید (مثلاً <span dir="ltr">gemini-mirror</span>) و{" "}
+                          <span dir="ltr">Deploy</span> کنید.
+                        </li>
+                        <li>
+                          روی <span dir="ltr">Edit code</span> بزنید، کد پیش‌فرض را کامل پاک کنید و کد
+                          آمادهٔ زیر را جایگزین کنید و دوباره <span dir="ltr">Deploy</span> بزنید.
+                        </li>
+                        <li>
+                          آدرس وِرکر <span dir="ltr">(https://NAME.YOUR-SUBDOMAIN.workers.dev)</span> را
+                          کپی و در کادر «آدرس میان‌کار جمینای» بالا وارد کنید، سپس ذخیره و اتصال را
+                          بیازمایید.
+                        </li>
+                      </ol>
+                      <div className="rounded-lg border border-border/70 bg-muted/40 p-3">
+                        <div className="flex items-center justify-between gap-2 mb-2">
+                          <p className="text-[11px] font-medium text-muted-foreground">
+                            کد آمادهٔ وِرکر (کلیک روی کپی):
+                          </p>
+                          <CopyButton value={CLOUDFLARE_WORKER_CODE} label="کپی کد وِرکر" />
+                        </div>
+                        <pre
+                          dir="ltr"
+                          className="text-[10.5px] leading-4 font-mono overflow-x-auto max-h-56 text-muted-foreground"
+                        >
+                          <code>{CLOUDFLARE_WORKER_CODE}</code>
+                        </pre>
+                      </div>
+                      <p className="text-[11px] text-muted-foreground leading-4 flex items-start gap-1.5">
+                        <Info className="h-3.5 w-3.5 mt-0.5 shrink-0" aria-hidden />
+                        چرا این روش کار می‌کند؟ وِرکر کلادفلر در کشورهای مجاز گوگل اجرا می‌شود و
+                        درخواست‌ها را با IP خودش به گوگل می‌رساند؛ محدودیت جغرافیاییِ میزبان شما دیگر
+                        اثری ندارد. اگر آدرس <span dir="ltr">workers.dev</span> در شبکهٔ شما فیلتر است،
+                        در تنظیمات وِرکر یک دامنهٔ شخصی (Custom Domain) وصل کنید و همان را وارد کنید.
+                      </p>
+                    </AccordionContent>
+                  </AccordionItem>
+                </Accordion>
               </div>
 
               {geminiMsg && <InlineAlert msg={geminiMsg} />}

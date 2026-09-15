@@ -269,6 +269,9 @@ interface ChatSession {
   tgId: number;
   at: number;
   booksCache: { at: number; key: string; data: BooksListData } | null;
+  /** راند ۲۶ — وضعیت منوی مرحله‌ای کتاب‌خانه (دوره → پایه → درس)؛ برای
+   * اندیس‌های کوتاه callback (سقف ۶۴ بایت) در سرویس نگه داشته می‌شود. */
+  browse?: LibraryBrowse | null;
 }
 
 const chatSessions = new Map<number, ChatSession>();
@@ -824,7 +827,7 @@ async function sendHelp(chatId: number): Promise<void> {
   const lines = [
     "ℹ️ <b>راهنمای بات آموزش هوشمند</b>",
     "",
-    "📚 <b>کتاب‌خانه</b> — فهرست کتاب‌های هوشمند شما با فیلتر دورهٔ تحصیلی؛ هر کتاب دارای خلاصه، جزوه، شکل، نمونه‌سؤال و پادکست است.",
+    "📚 <b>کتاب‌خانه</b> — منوی مرحله‌ای مثل سایت مدرسه: دورهٔ تحصیلی ← پایهٔ تحصیلی ← درس/نوع کتاب ← فهرست کتاب‌ها (با شمارش روی هر دکمه)؛ هر کتاب دارای خلاصه، جزوه، شکل، نمونه‌سؤال و پادکست است.",
     "📄 <b>خلاصهٔ کتاب</b> — خلاصهٔ کامل به‌صورت متن + فایل PDF با فونت فارسی (وزیرمتن).",
     "📒 <b>جزوهٔ شبامتحان</b> — تعاریف، فرمول‌ها و نکات کنکوری، به‌صورت متن + PDF با فونت فارسی.",
     "🎧 <b>پادکست صوتی</b> — نسخهٔ شنیداری کتاب؛ در مسیر هم گوش بدهید!",
@@ -871,86 +874,353 @@ async function sendFallback(chatId: number): Promise<void> {
   );
 }
 
-// ─────────────────────────────── کتاب‌خانه ───────────────────────────────
+// ─────────────────────────────── کتاب‌خانه (منوی مرحله‌ای) ───────────────────────────────
+// راند ۲۶ — خواستهٔ مدیر: «چرا دورهٔ تحصیلی، پایهٔ تحصیلی و نوع کتاب منو ندارد؟»
+// الگوی chap.sch.ir حالا کامل پیاده شده: دورهٔ تحصیلی → پایهٔ تحصیلی → درس/نوع
+// کتاب → فهرست کتاب‌ها. همهٔ مراحل روی همان فهرست کامل (کش ۶۰ ثانیه‌ای چت)
+// به‌صورت محلی فیلتر می‌شوند تا شمارشِ روی دکمه‌ها همیشه با دادهٔ واقعی یکی
+// باشد. وضعیت مراحل در نشست چت نگه داشته می‌شود تا callback_data کوتاه بماند
+// (سقف ۶۴ بایت تلگرام) و متن فارسیِ آزاد (نام پایه/درس) مشکلی ایجاد نکند.
 
-async function sendBooksList(
+const NO_LEVEL = "__none"; // callback کتاب‌های بدون دورهٔ مشخص
+
+interface LibraryBrowse {
+  level: string | null; // کد دورهٔ انتخابی؛ null = همهٔ کتاب‌ها (بدون فیلتر)
+  grade: string | null; // مقدار پایهٔ انتخابی؛ "" = بدون پایه؛ null = همهٔ پایه‌ها
+  gradeIdx: number; // اندیس پایه برای بازگشت/به‌روزرسانی (-1 = همهٔ پایه‌ها)
+  subject: string | null; // درس/نوع کتاب انتخابی؛ "" = بدون درس؛ null = همه
+  subjectIdx: number; // اندیس درس برای بازگشت/به‌روزرسانی (-1 = همهٔ درس‌ها)
+  grades: string[]; // گزینه‌های پایهٔ مشتق‌شده (پشتوانهٔ اندیس‌های callback)
+  subjects: string[]; // گزینه‌های درس مشتق‌شده
+}
+
+type LibraryData = { ok: true; data: BooksListData } | { ok: false; text: string } | "unlinked";
+
+/** فهرست کامل کتاب‌های کاربر — با کش ۶۰ ثانیه‌ای (کلید "") */
+async function fetchLibrary(
   chatId: number,
   from: TgUser,
-  opts: { messageId?: number; fresh?: boolean; hint?: string; level?: string | null } = {}
+  opts: { fresh?: boolean } = {}
+): Promise<LibraryData> {
+  const cached = chatSessions.get(chatId)?.booksCache;
+  if (!opts.fresh && cached && cached.key === "" && Date.now() - cached.at < 60_000) {
+    return { ok: true, data: cached.data };
+  }
+  const res = await authed(chatId, from, "/api/v1/books");
+  if (res === "unlinked") return "unlinked";
+  if (!res || !res.ok) {
+    return { ok: false, text: `⚠️ ${esc(apiErrorText(await readJson(res)))}` };
+  }
+  const data = await readJson<BooksListData>(res);
+  if (!data) return { ok: false, text: NET_ERR };
+  const s = chatSessions.get(chatId);
+  if (s) s.booksCache = { at: Date.now(), key: "", data };
+  return { ok: true, data };
+}
+
+function levelOfBook(b: BookSummary): string {
+  return b.level ?? "";
+}
+function gradeOfBook(b: BookSummary): string {
+  return b.gradeLevel ?? "";
+}
+function subjectOfBook(b: BookSummary): string {
+  return b.subject ?? "";
+}
+function gradeFa(level: string | null, grade: string): string {
+  if (grade === "") return "بدون پایهٔ مشخص";
+  return level === "PRIMARY" ? `کلاس ${grade}` : `پایهٔ ${grade}`;
+}
+function subjectFa(subject: string): string {
+  return subject === "" ? "بدون درس مشخص" : subject;
+}
+function chunkRows<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+/** ترتیب رسمی پایه‌های هر دوره (برای مرتب‌سازی دکمه‌ها مثل chap.sch.ir) */
+const GRADE_ORDER: Record<string, string[]> = {
+  PRE_PRIMARY: [],
+  PRIMARY: ["اول", "دوم", "سوم", "چهارم", "پنجم", "ششم"],
+  MIDDLE_1: ["هفتم", "هشتم", "نهم"],
+  MIDDLE_2: ["دهم", "یازدهم", "دوازدهم"],
+  TECHNICAL: ["دهم", "یازدهم", "دوازدهم"],
+};
+
+/** پایه‌های موجودِ کتاب‌های یک دوره — مرتب با ترتیب رسمی؛ «بدون پایه» آخر */
+function deriveGrades(books: BookSummary[], level: string | null): string[] {
+  const set = new Set<string>();
+  for (const b of books) {
+    if (levelOfBook(b) === level) set.add(gradeOfBook(b));
+  }
+  const canon = GRADE_ORDER[level ?? ""] ?? [];
+  const known = canon.filter((g) => set.has(g));
+  const unknown = [...set].filter((g) => !canon.includes(g) && g !== "").sort((a, b) => a.localeCompare(b, "fa"));
+  const out = [...known, ...unknown];
+  if (set.has("")) out.push("");
+  return out;
+}
+
+/** درس‌های/نوع کتاب‌های موجود — الفبایی؛ «بدون درس» آخر */
+function deriveSubjects(books: BookSummary[]): string[] {
+  const set = new Set<string>();
+  for (const b of books) set.add(subjectOfBook(b));
+  const out = [...set].filter((s) => s !== "").sort((a, b) => a.localeCompare(b, "fa"));
+  if (set.has("")) out.push("");
+  return out;
+}
+
+async function deliverScreen(
+  chatId: number,
+  opts: { messageId?: number },
+  text: string,
+  kb: InlineKeyboard
+): Promise<void> {
+  if (opts.messageId) await editMessage(chatId, opts.messageId, text, kb);
+  else await sendMessage(chatId, text, kb);
+}
+
+/** گام ۱ — انتخاب دورهٔ تحصیلی (ریشهٔ کتاب‌خانه) */
+async function sendLibraryRoot(
+  chatId: number,
+  from: TgUser,
+  opts: { messageId?: number; fresh?: boolean; hint?: string } = {}
 ): Promise<void> {
   await chatAction(chatId, "typing");
+  const r = await fetchLibrary(chatId, from, opts);
+  if (r === "unlinked") return void (await promptLink(chatId));
+  if (!r.ok) return void (await deliverScreen(chatId, opts, r.text, [[{ text: "🔄 تلاش دوباره", callback_data: "books" }]]));
+  const s = chatSessions.get(chatId);
+  if (s) s.browse = null; // شروع تازه
 
-  // کش ۶۰ ثانیه‌ای هر چت (دکمهٔ «به‌روزرسانی» آن را دور می‌زند)
-  const cacheKey = opts.level ?? "";
-  let data: BooksListData | null = null;
-  const cached = chatSessions.get(chatId)?.booksCache;
-  if (!opts.fresh && cached && cached.key === cacheKey && Date.now() - cached.at < 60_000) data = cached.data;
-
-  if (!data) {
-    const path = opts.level ? `/api/v1/books?level=${encodeURIComponent(opts.level)}` : "/api/v1/books";
-    const res = await authed(chatId, from, path);
-    if (res === "unlinked") return void (await promptLink(chatId));
-    if (!res || !res.ok) {
-      const msg = apiErrorText(await readJson(res));
-      const text = `⚠️ ${esc(msg)}`;
-      if (opts.messageId) return void (await editMessage(chatId, opts.messageId, text));
-      return void (await sendMessage(chatId, text));
-    }
-    data = await readJson<BooksListData>(res);
-    if (!data) {
-      if (opts.messageId) return void (await editMessage(chatId, opts.messageId, NET_ERR));
-      return void (await sendMessage(chatId, NET_ERR));
-    }
-    const s = chatSessions.get(chatId);
-    if (s) s.booksCache = { at: Date.now(), key: cacheKey, data };
-  }
-
-  const all = data.books ?? [];
-  const books = all.slice(0, BOOKS_PAGE_LIMIT);
-  const active = opts.level ? LEVELS_FA.find((l) => l.code === opts.level) : null;
-  const kb: InlineKeyboard = books.map((b) => [
-    { text: trunc(`${bookStatusEmoji(b.status)} ${b.title}${b.gradeLevel ? ` — پایهٔ ${b.gradeLevel}` : ""}`, 58), callback_data: `book:${b.id}` },
-  ]);
-
-  // فیلتر دورهٔ تحصیلی (round 18): «همه» + دو دوره در هر ردیف
-  const levelRows: InlineKeyboard = [[{ text: "✨ همهٔ دوره‌ها", callback_data: "bookslvl:" }]];
-  const levelBtns: InlineButton[] = LEVELS_FA.map((l) => ({
-    text: `${l.emoji}${active?.code === l.code ? "✔️" : ""} ${l.label}`,
-    callback_data: `bookslvl:${l.code}`,
-  }));
-  for (let i = 0; i < levelBtns.length; i += 2) {
-    levelRows.push(levelBtns.slice(i, i + 2));
-  }
-  kb.push(...levelRows);
-  kb.push([{ text: "🔄 به‌روزرسانی", callback_data: active ? `bookslvl:${active.code}` : "books" }]);
+  const all = r.data.books ?? [];
+  const kb: InlineKeyboard = [];
+  const levelBtns = LEVELS_FA.map((l) => {
+    const n = all.filter((b) => levelOfBook(b) === l.code).length;
+    return { text: `${l.emoji} ${l.label}${n > 0 ? ` (${faNum(n)})` : ""}`, callback_data: `blvl:${l.code}` };
+  });
+  kb.push(...chunkRows(levelBtns, 2));
+  const noLevel = all.filter((b) => levelOfBook(b) === "").length;
+  if (noLevel > 0) kb.push([{ text: `🗂 بدون دورهٔ مشخص (${faNum(noLevel)})`, callback_data: `blvl:${NO_LEVEL}` }]);
+  kb.push([{ text: `📚 همهٔ کتاب‌ها (${faNum(all.length)})`, callback_data: "ball" }]);
+  kb.push([{ text: "🔄 به‌روزرسانی", callback_data: "books" }]);
+  if (r.data.canUpload) kb.push([{ text: "➕ افزودن کتاب جدید (PDF)", callback_data: "upnew" }]);
 
   let text: string;
   if (all.length === 0) {
-    text =
-      `📚 <b>کتاب‌خانه هوشمند</b>${active ? ` — ${active.emoji} ${esc(active.label)}` : ""}\n\nهنوز کتابی برای شما ثبت نشده است! 🌱\nبه‌محض افزودن کتاب توسط مدیر یا معلمان، همین‌جا نمایش داده می‌شود.`;
-    if (data.canUpload) {
-      text += "\n\n➕ شما می‌توانید همین‌جا اولین کتاب را اضافه کنید — فایل PDF را بفرستید!";
-    }
+    text = "📚 <b>کتاب‌خانه هوشمند</b>\n\nهنوز کتابی برای شما ثبت نشده است! 🌱\nبه‌محض افزودن کتاب توسط مدیر یا معلمان، همین‌جا نمایش داده می‌شود.";
+    if (r.data.canUpload) text += "\n\n➕ شما می‌توانید همین‌جا اولین کتاب را اضافه کنید — فایل PDF را بفرستید!";
   } else {
-    const structByLevel = new Map<string, number>();
-    for (const b of all) {
-      const key = b.levelLabel ?? "بدون دوره";
-      structByLevel.set(key, (structByLevel.get(key) ?? 0) + 1);
-    }
-    const structText =
-      !active && all.length > 1
-        ? `\n📕 بر اساس دوره: ${[...structByLevel.entries()].map(([l, n]) => `${esc(l)} (${faNum(n)})`).join(" · ")}`
-        : "";
-    text = `📚 <b>کتاب‌خانه هوشمند</b>${active ? ` — ${active.emoji} ${esc(active.label)}` : ""}\n\n${faNum(all.length)} کتاب برای شما قابل مشاهده است — برای جزئیات، روی عنوان کتاب بزنید.${structText}`;
-    if (all.length > books.length) text += `\n(و ${faNum(all.length - books.length)} کتاب دیگر… از نسخهٔ وب)`;
-  }
-  if (data.canUpload) {
-    kb.push([{ text: "➕ افزودن کتاب جدید (PDF)", callback_data: "upnew" }]);
+    text =
+      `📚 <b>کتاب‌خانه هوشمند</b> — ${faNum(all.length)} کتاب\n\n` +
+      `🎓 <b>گام ۱ از ۳ — دورهٔ تحصیلی</b> را انتخاب کنید؛\nسپس پایهٔ تحصیلی و درس/نوع کتاب را می‌بینید. اگر فیلتری نمی‌خواهید، «📚 همهٔ کتاب‌ها» را بزنید.`;
   }
   if (opts.hint) text += `\n\n💡 ${esc(opts.hint)}`;
+  await deliverScreen(chatId, opts, text, kb);
+}
 
-  if (opts.messageId) await editMessage(chatId, opts.messageId, text, kb);
-  else await sendMessage(chatId, text, kb);
+/** گام ۲ — انتخاب پایهٔ تحصیلی (پس از انتخاب دوره) */
+async function sendLibraryGrades(
+  chatId: number,
+  from: TgUser,
+  levelCode: string, // "" = کتاب‌های بدون دورهٔ مشخص
+  opts: { messageId?: number; fresh?: boolean } = {}
+): Promise<void> {
+  await chatAction(chatId, "typing");
+  const meta = LEVELS_FA.find((l) => l.code === levelCode);
+  const levelLabel = levelCode === "" ? "بدون دورهٔ مشخص" : (meta?.label ?? levelCode);
+  const emoji = meta?.emoji ?? "🗂";
+
+  const r = await fetchLibrary(chatId, from, opts);
+  if (r === "unlinked") return void (await promptLink(chatId));
+  if (!r.ok) return void (await deliverScreen(chatId, opts, r.text, [[{ text: "🔄 تلاش دوباره", callback_data: `blvl:${levelCode === "" ? NO_LEVEL : levelCode}` }]]));
+
+  const all = (r.data.books ?? []).filter((b) => levelOfBook(b) === levelCode);
+  if (all.length === 0) {
+    const kb: InlineKeyboard = [[{ text: "🔙 بازگشت به دوره‌ها", callback_data: "books" }]];
+    if (r.data.canUpload) kb.push([{ text: "➕ افزودن کتاب جدید (PDF)", callback_data: "upnew" }]);
+    return void (await deliverScreen(
+      chatId,
+      opts,
+      `${emoji} <b>${esc(levelLabel)}</b>\n\nکتابی در این دوره ثبت نشده است! 🌱\nدورهٔ دیگری را انتخاب کنید یا بعداً سر بزنید.`,
+      kb
+    ));
+  }
+
+  const grades = deriveGrades(all, levelCode);
+  const s = chatSessions.get(chatId);
+  if (s) s.browse = { level: levelCode, grade: null, gradeIdx: -1, subject: null, subjectIdx: -1, grades, subjects: [] };
+
+  const kb: InlineKeyboard = [];
+  const gradeBtns = grades.map((g, i) => ({
+    text: `${gradeFa(levelCode, g)} (${faNum(all.filter((b) => gradeOfBook(b) === g).length)})`,
+    callback_data: `bgrd:${i}`,
+  }));
+  kb.push(...chunkRows(gradeBtns, 2));
+  kb.push([{ text: `✨ همهٔ پایه‌ها (${faNum(all.length)})`, callback_data: "bgrd:-1" }]);
+  kb.push([{ text: "🔄 به‌روزرسانی", callback_data: `blvl:${levelCode === "" ? NO_LEVEL : levelCode}` }]);
+  kb.push([{ text: "🔙 تغییر دوره", callback_data: "books" }]);
+
+  await deliverScreen(
+    chatId,
+    opts,
+    `${emoji} <b>${esc(levelLabel)}</b> — ${faNum(all.length)} کتاب\n\n🎓 <b>گام ۲ از ۳ — پایهٔ تحصیلی</b> را انتخاب کنید 👇`,
+    kb
+  );
+}
+
+/** گام ۳ — انتخاب درس/نوع کتاب (پس از انتخاب پایه) */
+async function sendLibrarySubjects(
+  chatId: number,
+  from: TgUser,
+  gradeIdx: number,
+  opts: { messageId?: number; fresh?: boolean } = {}
+): Promise<void> {
+  const s = chatSessions.get(chatId);
+  const browse = s?.browse ?? null;
+  if (!browse || browse.level === null || !browse.grades.length) {
+    // نشست منقضی (مثلاً ری‌استارت بات) — از ابتدا شروع می‌کنیم
+    return void (await sendLibraryRoot(chatId, from, { messageId: opts.messageId, fresh: true }));
+  }
+  const level = browse.level;
+  const meta = LEVELS_FA.find((l) => l.code === level);
+  const levelLabel = level === "" ? "بدون دورهٔ مشخص" : (meta?.label ?? level);
+  const emoji = meta?.emoji ?? "🗂";
+  const grade = gradeIdx >= 0 && gradeIdx < browse.grades.length ? browse.grades[gradeIdx] : null;
+
+  await chatAction(chatId, "typing");
+  const r = await fetchLibrary(chatId, from, opts);
+  if (r === "unlinked") return void (await promptLink(chatId));
+  if (!r.ok) return void (await deliverScreen(chatId, opts, r.text, [[{ text: "🔄 تلاش دوباره", callback_data: `bgrd:${gradeIdx}` }]]));
+
+  let all = (r.data.books ?? []).filter((b) => levelOfBook(b) === level);
+  if (grade !== null) all = all.filter((b) => gradeOfBook(b) === grade);
+
+  if (all.length === 0) {
+    const kb: InlineKeyboard = [
+      [{ text: "🔙 تغییر پایه", callback_data: `blvl:${level === "" ? NO_LEVEL : level}` }],
+      [{ text: "🏫 دوره‌ها", callback_data: "books" }],
+    ];
+    return void (await deliverScreen(
+      chatId,
+      opts,
+      `${emoji} <b>${esc(levelLabel)}</b>\n\nکتابی برای این پایه پیدا نشد! 🌱\nپایهٔ دیگری را انتخاب کنید.`,
+      kb
+    ));
+  }
+
+  const subjects = deriveSubjects(all);
+  if (s?.browse) {
+    s.browse.grade = grade;
+    s.browse.gradeIdx = grade !== null ? gradeIdx : -1;
+    s.browse.subject = null;
+    s.browse.subjectIdx = -1;
+    s.browse.subjects = subjects;
+  }
+
+  const kb: InlineKeyboard = [];
+  const subBtns = subjects.map((sub, i) => ({
+    text: `${subjectFa(sub)} (${faNum(all.filter((b) => subjectOfBook(b) === sub).length)})`,
+    callback_data: `bsub:${i}`,
+  }));
+  kb.push(...chunkRows(subBtns, 2));
+  kb.push([{ text: `✨ همهٔ درس‌ها (${faNum(all.length)})`, callback_data: "bsub:-1" }]);
+  kb.push([{ text: "🔄 به‌روزرسانی", callback_data: `bgrd:${gradeIdx}` }]);
+  kb.push([
+    { text: "🔙 تغییر پایه", callback_data: `blvl:${level === "" ? NO_LEVEL : level}` },
+    { text: "🏫 دوره‌ها", callback_data: "books" },
+  ]);
+
+  const crumb = [levelLabel, grade !== null ? gradeFa(level, grade) : "همهٔ پایه‌ها"];
+  await deliverScreen(
+    chatId,
+    opts,
+    `${emoji} <b>${esc(crumb.join(" · "))}</b> — ${faNum(all.length)} کتاب\n\n📕 <b>گام ۳ از ۳ — درس/نوع کتاب</b> را انتخاب کنید 👇`,
+    kb
+  );
+}
+
+/** فهرست نهایی کتاب‌ها — فیلترشده با مسیر انتخاب‌شده (یا «همهٔ کتاب‌ها») */
+async function sendLibraryList(
+  chatId: number,
+  from: TgUser,
+  subjectIdx: number | null, // null = همهٔ درس‌ها / مسیر «همهٔ کتاب‌ها»
+  opts: { messageId?: number; fresh?: boolean } = {}
+): Promise<void> {
+  const s = chatSessions.get(chatId);
+  const browse = s?.browse ?? null;
+  // اندیس صریح اما نشست/فهرست نامعتبر (ری‌استارت یا تغییر داده) → از ابتدا
+  if (
+    subjectIdx !== null &&
+    (!browse || browse.level === null || (subjectIdx >= 0 && (subjectIdx >= browse.subjects.length || !browse.subjects.length)))
+  ) {
+    return void (await sendLibraryRoot(chatId, from, { messageId: opts.messageId, fresh: true }));
+  }
+
+  await chatAction(chatId, "typing");
+  const r = await fetchLibrary(chatId, from, opts);
+  if (r === "unlinked") return void (await promptLink(chatId));
+  if (!r.ok) {
+    return void (await deliverScreen(chatId, opts, r.text, [[{ text: "🔄 تلاش دوباره", callback_data: "books" }]]));
+  }
+
+  let all = r.data.books ?? [];
+  const crumb: string[] = [];
+  if (browse && browse.level !== null) {
+    const level = browse.level;
+    const meta = LEVELS_FA.find((l) => l.code === level);
+    crumb.push(level === "" ? "بدون دورهٔ مشخص" : (meta?.label ?? level));
+    all = all.filter((b) => levelOfBook(b) === level);
+    if (browse.grade !== null) {
+      crumb.push(gradeFa(level, browse.grade));
+      all = all.filter((b) => gradeOfBook(b) === browse.grade);
+    }
+    if (subjectIdx !== null) {
+      const subj = subjectIdx >= 0 ? browse.subjects[subjectIdx] : null;
+      if (s?.browse) s.browse.subjectIdx = subjectIdx;
+      if (subj !== null) {
+        crumb.push(subjectFa(subj));
+        all = all.filter((b) => subjectOfBook(b) === subj);
+      }
+    }
+  }
+
+  const shown = all.slice(0, BOOKS_PAGE_LIMIT);
+  const showGradeSuffix = browse?.grade == null; // در «همهٔ پایه‌ها» پایه کنار عنوان می‌آید
+  const kb: InlineKeyboard = shown.map((b) => [
+    {
+      text: trunc(
+        `${bookStatusEmoji(b.status)} ${b.title}${showGradeSuffix && b.gradeLevel ? ` — ${gradeFa(b.level, b.gradeLevel)}` : ""}`,
+        58
+      ),
+      callback_data: `book:${b.id}`,
+    },
+  ]);
+
+  if (browse && browse.level !== null) {
+    kb.push([{ text: "🔙 تغییر درس", callback_data: `bgrd:${browse.gradeIdx}` }]);
+    kb.push([
+      { text: "🔙 تغییر پایه", callback_data: `blvl:${browse.level === "" ? NO_LEVEL : browse.level}` },
+      { text: "🏫 دوره‌ها", callback_data: "books" },
+    ]);
+    kb.push([{ text: "🔄 به‌روزرسانی", callback_data: `bsub:${browse.subjectIdx}` }]);
+  } else {
+    kb.push([{ text: "🔙 منوی دوره‌ها", callback_data: "books" }]);
+    kb.push([{ text: "🔄 به‌روزرسانی", callback_data: "ball" }]);
+  }
+  if (r.data.canUpload) kb.push([{ text: "➕ افزودن کتاب جدید (PDF)", callback_data: "upnew" }]);
+
+  const title = crumb.length > 0 ? `📚 <b>${esc(crumb.join(" · "))}</b>` : "📚 <b>همهٔ کتاب‌ها</b>";
+  let text: string;
+  if (all.length === 0) {
+    text = `${title}\n\nکتابی مطابق این انتخاب پیدا نشد! 🌱\nفیلتر دیگری را امتحان کنید.`;
+  } else {
+    text = `${title}\n\n${faNum(all.length)} کتاب — برای جزئیات، روی عنوان کتاب بزنید 👇`;
+    if (all.length > shown.length) text += `\n(و ${faNum(all.length - shown.length)} کتاب دیگر… از نسخهٔ وب)`;
+  }
+  await deliverScreen(chatId, opts, text, kb);
 }
 
 function bestAttempt(
@@ -2195,7 +2465,7 @@ async function captureWizardInput(chatId: number, text: string): Promise<boolean
   if (text.includes("کتاب‌خانه") || text.includes("کتابخانه")) {
     uploadSessions.delete(chatId);
     await sendMessage(chatId, "❌ افزودن کتاب لغو شد — بازگشت به کتاب‌خانه…");
-    await sendBooksList(chatId, w.tgUser, { fresh: true });
+    await sendLibraryRoot(chatId, w.tgUser, { fresh: true });
     return true;
   }
   if (text === "خروج") {
@@ -2352,7 +2622,7 @@ async function onMessage(m: TgMessage): Promise<void> {
   const cmd = cmdMatch?.[1]?.toLowerCase();
   if (cmd === "start") return void (await cmdStart(chatId, from));
   if (cmd === "app") return void (await sendApp(chatId));
-  if (cmd === "books") return void (await sendBooksList(chatId, from, { fresh: true }));
+  if (cmd === "books") return void (await sendLibraryRoot(chatId, from, { fresh: true }));
   if (cmd === "upload") {
     const s = await getSession(chatId, from);
     if (!s) return void (await promptLink(chatId));
@@ -2385,10 +2655,10 @@ async function onMessage(m: TgMessage): Promise<void> {
   }
   if (text.includes("اتصال با کد")) return void (await sendLinkGuide(chatId));
   if (text.includes("کتاب‌خانه") || text.includes("کتاب‌ها") || text.includes("کتابخانه")) {
-    return void (await sendBooksList(chatId, from, { fresh: true }));
+    return void (await sendLibraryRoot(chatId, from, { fresh: true }));
   }
   if (text.includes("آزمون")) {
-    return void (await sendBooksList(chatId, from, { hint: "یکی از کتاب‌ها را انتخاب کنید و «✍️ شروع آزمون» را بزنید." }));
+    return void (await sendLibraryRoot(chatId, from, { hint: "یکی از کتاب‌ها را انتخاب کنید و «✍️ شروع آزمون» را بزنید." }));
   }
   if (text.includes("افزودن کتاب") || text.includes("کتاب جدید")) {
     const s = await getSession(chatId, from);
@@ -2427,10 +2697,29 @@ async function onCallback(cb: TgCallbackQuery): Promise<void> {
       return void (await doLogout(chatId, from, cb.id));
     case "books":
       await answerCb(cb.id);
-      return void (await sendBooksList(chatId, from, { messageId, fresh: true }));
-    case "bookslvl": {
+      return void (await sendLibraryRoot(chatId, from, { messageId, fresh: true }));
+    case "ball": {
       await answerCb(cb.id);
-      return void (await sendBooksList(chatId, from, { messageId, fresh: true, level: a || null }));
+      const sBall = chatSessions.get(chatId);
+      if (sBall) sBall.browse = null; // «همهٔ کتاب‌ها» — بدون فیلتر مرحله‌ای
+      return void (await sendLibraryList(chatId, from, null, { messageId, fresh: true }));
+    }
+    case "blvl":
+    case "bookslvl": {
+      // bookslvl = callback قدیمی راند ۱۸ (پیام‌های زندهٔ قدیمی هنوز آن را می‌فرستند)
+      await answerCb(cb.id);
+      if (!a) return void (await sendLibraryRoot(chatId, from, { messageId, fresh: true }));
+      return void (await sendLibraryGrades(chatId, from, a === NO_LEVEL ? "" : a, { messageId, fresh: true }));
+    }
+    case "bgrd": {
+      await answerCb(cb.id);
+      const gi = Number.parseInt(a, 10);
+      return void (await sendLibrarySubjects(chatId, from, Number.isFinite(gi) ? gi : -1, { messageId, fresh: true }));
+    }
+    case "bsub": {
+      await answerCb(cb.id);
+      const si = Number.parseInt(a, 10);
+      return void (await sendLibraryList(chatId, from, Number.isFinite(si) ? si : null, { messageId, fresh: true }));
     }
     case "book":
       await answerCb(cb.id);

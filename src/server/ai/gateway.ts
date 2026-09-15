@@ -3,6 +3,7 @@ import { db } from "@/lib/db";
 import { Errors } from "@/server/core/errors";
 import { FEATURES, type Feature } from "@/server/core/constants";
 import { resolveAiProvider } from "@/server/services/settings";
+import { geminiFetch, type GeminiTransport } from "@/server/services/gemini-net";
 
 // Spec §10 — CENTRAL AI GATEWAY. No feature may call a provider directly.
 // Responsibilities: provider selection, retry, timeout, cost accounting, usage metering,
@@ -35,9 +36,8 @@ export interface AIResponse {
 const PROVIDER = "zai";
 const MODEL = "glm";
 const TIMEOUT_MS = 60_000;
-const GEMINI_TIMEOUT_MS = 90_000; // gemini-2.5-pro can be slow on long outputs
+const GEMINI_TIMEOUT_MS = 90_000; // gemini pro can be slow on long outputs
 const MAX_ATTEMPTS = 2;
-const GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models";
 
 // Estimated unit cost per 1K chars (milli-toman) — for metering/accounting only
 const COST_PER_1K_CHARS = 5;
@@ -75,11 +75,14 @@ async function callProvider(req: AIRequest, signal: AbortSignal): Promise<string
 // (systemPrompt, history, userMessage) → text. REST generateContent with
 // x-goog-api-key header (key never logged, never returned). Roles map 1:1
 // (assistant→model) per the Gemini contents schema.
+// Round 26 — تمام ترافیک از geminiFetch می‌گذرد: میان‌کار (Cloudflare Worker)
+// یا پروکسی HTTP در صورت تنظیم، بدون دست‌زدن به کد و در هر میزبانی.
 async function callGemini(
   req: AIRequest,
   apiKey: string,
   model: string,
-  signal: AbortSignal
+  signal: AbortSignal,
+  tr: GeminiTransport
 ): Promise<string> {
   const contents: Array<{ role: "user" | "model"; parts: Array<{ text: string }> }> = [
     ...(req.history ?? [])
@@ -95,12 +98,12 @@ async function callGemini(
       maxOutputTokens: 8192,
     },
   };
-  const res = await fetch(`${GEMINI_ENDPOINT}/${encodeURIComponent(model)}:generateContent`, {
+  const res = await geminiFetch(`/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
     body: JSON.stringify(body),
     signal,
-  });
+  }, tr);
   if (!res.ok) {
     const errText = await res.text().catch(() => "");
     if (res.status === 400 || res.status === 401 || res.status === 403) {
@@ -138,7 +141,13 @@ export async function aiComplete(req: AIRequest): Promise<AIResponse> {
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       content = useGemini
-        ? await callGemini(req, providerConfig.apiKey, providerConfig.model, controller.signal)
+        ? await callGemini(
+            req,
+            providerConfig.apiKey,
+            providerConfig.model,
+            controller.signal,
+            { baseUrl: providerConfig.baseUrl, proxyUrl: providerConfig.proxyUrl }
+          )
         : await callProvider(req, controller.signal);
       clearTimeout(timer);
       break;

@@ -28,6 +28,9 @@ export interface PlatformSettings {
   aiProvider: "zai" | "gemini";
   geminiApiKey: string;
   geminiModel: GeminiModel;
+  // Round 26 — عبور از محدودیت جغرافیایی گوگل (قابل تغییر در هر میزبانی، بدون کد):
+  geminiBaseUrl: string; // آدرس میان‌کار/آینه (مثلاً Cloudflare Worker) — "" = نقطهٔ رسمی گوگل
+  geminiProxyUrl: string; // پروکسی HTTP(S) خروجی — "" = اتصال مستقیم
   telegramBotToken: string;
   telegramMiniAppUrl: string;
   telegramBotUsername: string; // cached from getMe
@@ -42,6 +45,8 @@ export const DEFAULT_SETTINGS: PlatformSettings = {
   aiProvider: "zai",
   geminiApiKey: "",
   geminiModel: "gemini-flash-latest", // مستعار رسمی گوگل — همیشه به جدیدترین فلش اشاره می‌کند
+  geminiBaseUrl: "",
+  geminiProxyUrl: "",
   telegramBotToken: "",
   telegramMiniAppUrl: "",
   telegramBotUsername: "",
@@ -55,6 +60,8 @@ const KEYS = {
   aiProvider: "ai.provider",
   geminiApiKey: "ai.gemini.apiKey",
   geminiModel: "ai.gemini.model",
+  geminiBaseUrl: "ai.gemini.baseUrl",
+  geminiProxyUrl: "ai.gemini.proxyUrl",
   telegramBotToken: "telegram.botToken",
   telegramMiniAppUrl: "telegram.miniAppUrl",
   telegramBotUsername: "telegram.botUsername",
@@ -84,48 +91,54 @@ export async function getSettings(): Promise<PlatformSettings> {
   let telegramBotToken = g<string>(KEYS.telegramBotToken, "");
   let telegramMiniAppUrl = g<string>(KEYS.telegramMiniAppUrl, "");
   let telegramBotUsername = g<string>(KEYS.telegramBotUsername, "");
+  const geminiBaseUrl = g<string>(KEYS.geminiBaseUrl, "");
+  const geminiProxyUrl = g<string>(KEYS.geminiProxyUrl, "");
 
-  // ── Round 24 — Self-heal from the file mirror ──
-  // اگر جدول تنظیمات خالی/پاک شده باشد (مثلاً بعد از db push) و رازهای حیاتی
-  // در آینهٔ فایلی موجود باشند، به دیتابیس بازگردانده می‌شوند تا بات تلگرام و
-  // ارائه‌دهندهٔ جمینای بدون دخالت مدیر دوباره زنده شوند.
-  if (!geminiApiKey || !telegramBotToken) {
-    const backup = await readSettingsBackup();
-    const restore: Array<[string, string]> = [];
-    if (!telegramBotToken && backup.telegramBotToken) {
-      telegramBotToken = backup.telegramBotToken;
-      restore.push([KEYS.telegramBotToken, toJson(telegramBotToken)]);
-    }
-    if (!geminiApiKey && backup.geminiApiKey) {
-      geminiApiKey = backup.geminiApiKey;
-      restore.push([KEYS.geminiApiKey, toJson(geminiApiKey)]);
-    }
-    if (!telegramMiniAppUrl && backup.telegramMiniAppUrl) {
-      telegramMiniAppUrl = backup.telegramMiniAppUrl;
-      restore.push([KEYS.telegramMiniAppUrl, toJson(telegramMiniAppUrl)]);
-    }
-    if (!telegramBotUsername && backup.telegramBotUsername) {
-      telegramBotUsername = backup.telegramBotUsername;
-      restore.push([KEYS.telegramBotUsername, toJson(telegramBotUsername)]);
-    }
-    if (restore.length) {
-      console.warn(
-        `[settings] 🛡 بازیابی ${restore.length} تنظیم حساس از آینهٔ فایلی (توکن بات/کلید جمینای).`
-      );
-      await db
-        .$transaction(
-          restore.map(([key, value]) =>
-            db.platformSetting.upsert({ where: { key }, create: { key, value }, update: { value } })
-          )
+  // ── Round 24/26 — Self-heal from the file mirror ──
+  // اگر «ردیفِ» تنظیمات کلیدی از جدول حذف شده باشد (مثلاً پاک‌شدن کامل
+  // دیتابیس با prisma db push) و مقدارش در آینهٔ فایلی موجود باشد، به
+  // دیتابیس بازگردانده می‌شود تا بات تلگرام و ارائه‌دهندهٔ جمینای دوباره
+  // زنده شوند.
+  // 🔑 اصلاح راند ۲۶: معیار «نبودِ ردیف» است نه «خالی‌بودن مقدار» — اگر
+  // مدیر عمداً کلید/توکن را پاک کند، ردیف با مقدار خالی باقی می‌ماند و
+  // نباید از آینه بازگردانی شود (قبلاً پاک‌کردن کلید بی‌صدا خنثی می‌شد).
+  const backup = await readSettingsBackup();
+  const restore: Array<[string, string]> = [];
+  if (!map.has(KEYS.telegramBotToken) && backup.telegramBotToken) {
+    telegramBotToken = backup.telegramBotToken;
+    restore.push([KEYS.telegramBotToken, toJson(telegramBotToken)]);
+  }
+  if (!map.has(KEYS.geminiApiKey) && backup.geminiApiKey) {
+    geminiApiKey = backup.geminiApiKey;
+    restore.push([KEYS.geminiApiKey, toJson(geminiApiKey)]);
+  }
+  if (!map.has(KEYS.telegramMiniAppUrl) && backup.telegramMiniAppUrl) {
+    telegramMiniAppUrl = backup.telegramMiniAppUrl;
+    restore.push([KEYS.telegramMiniAppUrl, toJson(telegramMiniAppUrl)]);
+  }
+  if (!map.has(KEYS.telegramBotUsername) && backup.telegramBotUsername) {
+    telegramBotUsername = backup.telegramBotUsername;
+    restore.push([KEYS.telegramBotUsername, toJson(telegramBotUsername)]);
+  }
+  if (restore.length) {
+    console.warn(
+      `[settings] 🛡 بازیابی ${restore.length} تنظیم حساس از آینهٔ فایلی (توکن بات/کلید جمینای).`
+    );
+    await db
+      .$transaction(
+        restore.map(([key, value]) =>
+          db.platformSetting.upsert({ where: { key }, create: { key, value }, update: { value } })
         )
-        .catch((e) => console.error("[settings] restore-from-backup failed:", e));
-    }
+      )
+      .catch((e) => console.error("[settings] restore-from-backup failed:", e));
   }
 
   return {
     aiProvider: provider === "gemini" ? "gemini" : "zai",
     geminiApiKey,
     geminiModel: isModelCode(model) ? model : DEFAULT_SETTINGS.geminiModel,
+    geminiBaseUrl,
+    geminiProxyUrl,
     telegramBotToken,
     telegramMiniAppUrl,
     telegramBotUsername,
@@ -151,6 +164,8 @@ export async function getSettingsForClient(): Promise<
   return {
     aiProvider: s.aiProvider,
     geminiModel: s.geminiModel,
+    geminiBaseUrl: s.geminiBaseUrl,
+    geminiProxyUrl: s.geminiProxyUrl,
     telegramMiniAppUrl: s.telegramMiniAppUrl,
     telegramBotUsername: s.telegramBotUsername,
     telegramStorageEnabled: s.telegramStorageEnabled,
@@ -172,6 +187,8 @@ export interface SettingsUpdateInput {
   aiProvider?: unknown;
   geminiApiKey?: unknown; // undefined = keep; "" = clear; string = replace
   geminiModel?: unknown;
+  geminiBaseUrl?: unknown; // "" = نقطهٔ رسمی گوگل
+  geminiProxyUrl?: unknown; // "" = مستقیم
   telegramBotToken?: unknown; // same semantics
   telegramMiniAppUrl?: unknown;
   booksUploadTenants?: unknown;
@@ -213,6 +230,27 @@ export async function updateSettings(ctx: AuthContext, input: SettingsUpdateInpu
 
   if (input.geminiModel !== undefined && isModelCode(input.geminiModel)) {
     patch.geminiModel = toJson(input.geminiModel);
+  }
+
+  // Round 26 — میان‌کار/پروکسی جمینای (اعتبارسنجی سخت‌گیرانه؛ مقادیر خالی = مستقیم به گوگل)
+  const baseUrl = str(input.geminiBaseUrl);
+  if (baseUrl !== undefined) {
+    if (baseUrl !== "" && !/^https?:\/\/[a-zA-Z0-9.:-]+(\/\S*)?$/i.test(baseUrl)) {
+      throw Errors.validation(
+        "آدرس میان‌کار جمینای باید با http:// یا https:// شروع شود (مثلاً https://my-worker.workers.dev)."
+      );
+    }
+    patch.geminiBaseUrl = toJson(baseUrl.replace(/\/+$/, ""));
+  }
+
+  const proxyUrl = str(input.geminiProxyUrl);
+  if (proxyUrl !== undefined) {
+    if (proxyUrl !== "" && !/^https?:\/\/\S+$/i.test(proxyUrl)) {
+      throw Errors.validation(
+        "آدرس پروکسی جمینای باید با http:// یا https:// شروع شود (مثلاً http://user:pass@host:port). پروکسی SOCKS پشتیبانی نمی‌شود."
+      );
+    }
+    patch.geminiProxyUrl = toJson(proxyUrl);
   }
 
   const botToken = str(input.telegramBotToken);
@@ -286,12 +324,18 @@ export async function updateSettings(ctx: AuthContext, input: SettingsUpdateInpu
 
 // Effective AI provider resolution for the gateway (spec §10 — selection lives here).
 export async function resolveAiProvider(): Promise<
-  | { provider: "gemini"; apiKey: string; model: string }
+  | { provider: "gemini"; apiKey: string; model: string; baseUrl: string; proxyUrl: string }
   | { provider: "zai" }
 > {
   const s = await getSettings();
   if (s.aiProvider === "gemini" && s.geminiApiKey) {
-    return { provider: "gemini", apiKey: s.geminiApiKey, model: s.geminiModel };
+    return {
+      provider: "gemini",
+      apiKey: s.geminiApiKey,
+      model: s.geminiModel,
+      baseUrl: s.geminiBaseUrl.replace(/\/+$/, "") || "https://generativelanguage.googleapis.com",
+      proxyUrl: s.geminiProxyUrl.trim(),
+    };
   }
   return { provider: "zai" };
 }

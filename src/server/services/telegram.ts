@@ -3,6 +3,7 @@ import { db } from "@/lib/db";
 import { ApiError, Errors } from "@/server/core/errors";
 import { audit } from "./audit";
 import { getSettings } from "./settings";
+import { geminiFetch, type GeminiTransport } from "./gemini-net";
 import { createSession } from "@/server/auth/session";
 import type { AuthContext } from "@/server/auth/session";
 
@@ -126,8 +127,9 @@ export async function pingGemini(): Promise<{ ok: true; model: string; reply: st
   if (cfg.provider !== "gemini" || !cfg.apiKey) {
     throw Errors.validation("ابتدا کلید API جمینای را ذخیره و ارائه‌دهنده را روی جمینای تنظیم کنید.");
   }
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(cfg.model)}:generateContent`,
+  // Round 26 — از مسیر مرکزی (میان‌کار/پروکسی در صورت تنظیم) عبور می‌کند
+  const res = await geminiFetch(
+    `/v1beta/models/${encodeURIComponent(cfg.model)}:generateContent`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-goog-api-key": cfg.apiKey },
@@ -136,7 +138,8 @@ export async function pingGemini(): Promise<{ ok: true; model: string; reply: st
         generationConfig: { maxOutputTokens: 2048 },
       }),
       signal: AbortSignal.timeout(30_000),
-    }
+    },
+    { baseUrl: cfg.baseUrl, proxyUrl: cfg.proxyUrl }
   );
   const json = (await res.json().catch(() => null)) as {
     candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
@@ -146,11 +149,15 @@ export async function pingGemini(): Promise<{ ok: true; model: string; reply: st
     const msg = json?.error?.message ?? `HTTP ${res.status}`;
     // Round 25 — تشخیص محدودیت جغرافیایی: کلید معتبر است اما گوگل موقعیت IP
     // این سرور را نمی‌پذیرد؛ توضیح فارسی دقیق به‌جای پیام خام گوگل.
+    // Round 26 — حالا راه‌حل واقعی هم داریم: میان‌کار/پروکسی در تنظیمات.
     if (/user location is not supported/i.test(msg)) {
+      const via = cfg.baseUrl !== "https://generativelanguage.googleapis.com" || cfg.proxyUrl;
       throw Errors.conflict(
         "GEMINI_GEO_BLOCKED",
         "کلید شما معتبر است اما گوگل اجازهٔ استفاده از موقعیت جغرافیایی این سرور را نمی‌دهد (محدودیت منطقه‌ای API). " +
-          "این محدودیت سمت گوگل است و با تغییر کلید رفع نمی‌شود — پیشنهاد: ارائه‌دهندهٔ پیش‌فرض zai را فعال نگه دارید."
+          (via
+            ? "این خطا با میان‌کار/پروکسی فعلی هم برطرف نشد — آدرس میان‌کار یا پروکسی را در «تنظیمات و اتصال‌ها» بررسی کنید (مثلاً وِرکر باید در کشورهای مجاز باشد)."
+            : "راه‌حل: در «تنظیمات و اتصال‌ها ← عبور از محدودیت جغرافیایی» یک آدرس میان‌کار (Cloudflare Worker رایگان — کد آماده در همان صفحه) یا پروکسی HTTP تنظیم کنید. پیشنهاد دیگر: ارائه‌دهندهٔ پیش‌فرض zai.")
       );
     }
     throw Errors.conflict("GEMINI_TEST_FAILED", `آزمون اتصال جمینای ناموفق بود: ${msg.slice(0, 160)}`);
@@ -222,17 +229,19 @@ function persianModelLabel(code: string): string {
 
 async function probeOneModel(
   apiKey: string,
-  code: string
+  code: string,
+  tr?: GeminiTransport
 ): Promise<{ status: "available" | "retired" | "missing"; hint?: string; geo?: boolean }> {
   try {
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(code)}:countTokens`,
+    const res = await geminiFetch(
+      `/v1beta/models/${encodeURIComponent(code)}:countTokens`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
         body: JSON.stringify({ contents: [{ parts: [{ text: "." }] }] }),
         signal: AbortSignal.timeout(12_000),
-      }
+      },
+      tr
     );
     const json = (await res.json().catch(() => null)) as { error?: { message?: string } } | null;
     const msg = json?.error?.message ?? "";
@@ -248,10 +257,17 @@ async function probeOneModel(
   }
 }
 
-export async function listGeminiModels(apiKey: string): Promise<GeminiModelsResult> {
+export async function listGeminiModels(
+  apiKey: string,
+  tr?: GeminiTransport
+): Promise<GeminiModelsResult> {
+  // Round 26 — حمل‌ونقل (میان‌کار/پروکسی): اگر داده نشد از تنظیمات خوانده می‌شود؛
+  // مسیر آزمون مستقیم هم از همان مسیر می‌رود تا فهرست با شرایط واقعی تولید یکی باشد.
+  const transport = tr ?? (await geminiTransportOf());
+
   // ── مسیر ۱: ListModels رسمی ──
   try {
-    const listed = await fetchGeminiModelsList(apiKey);
+    const listed = await fetchGeminiModelsList(apiKey, transport);
     return { models: listed, source: "list", geoRestricted: false };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -271,7 +287,7 @@ export async function listGeminiModels(apiKey: string): Promise<GeminiModelsResu
   while (queue.length) {
     const batch: string[] = [];
     while (batch.length < 6 && queue.length) batch.push(queue.shift()!);
-    const batchResults = await Promise.all(batch.map((code) => probeOneModel(apiKey, code)));
+    const batchResults = await Promise.all(batch.map((code) => probeOneModel(apiKey, code, transport)));
     batch.forEach((code, i) => {
       const r = batchResults[i];
       if (r.geo) geoHit = true;
@@ -311,26 +327,34 @@ export async function listGeminiModels(apiKey: string): Promise<GeminiModelsResu
     source: "probe",
     geoRestricted: geoHit, // دست‌کم یک مدلِ موجود با خطای محدودیت جغرافیایی پاسخ داد
     noteFa: geoHit
-      ? "گوگل فهرست رسمی مدل‌ها (ListModels) را برای موقعیت جغرافیایی این سرور بسته است؛ فهرست بالا با «آزمون مستقیم» هر مدل ساخته شده و همهٔ آن‌ها برای کلید شما در دسترس‌اند. توجه: تولید محتوا با جمینای نیز ممکن است از همین محدودیت جغرافیایی متأثر شود — در صورت خطای مکرر، ارائه‌دهندهٔ پیش‌فرض zai را فعال نگه دارید."
+      ? "گوگل فهرست رسمی مدل‌ها (ListModels) را برای موقعیت جغرافیایی این سرور بسته است؛ فهرست بالا با «آزمون مستقیم» هر مدل ساخته شده و همهٔ آن‌ها برای کلید شما در دسترس‌اند. توجه: تولید محتوا با جمینای نیز ممکن است از همین محدودیت متأثر شود — برای رفع آن، در «عبور از محدودیت جغرافیایی» پایین همین صفحه یک آدرس میان‌کار (Cloudflare Worker رایگان) یا پروکسی HTTP تنظیم کنید؛ یا ارائه‌دهندهٔ پیش‌فرض zai را فعال نگه دارید."
       : "فهرست رسمی مدل‌ها برای موقعیت این سرور در دسترس نبود؛ این فهرست با «آزمون مستقیم» هر مدل ساخته شده است.",
   };
 }
 
+// حمل‌ونقل فعلی جمینای (تنظیمات ذخیره‌شده) — بدون وابستگی دایره‌ای به resolveAiProvider
+async function geminiTransportOf(): Promise<GeminiTransport> {
+  const { geminiTransport } = await import("./gemini-net");
+  return geminiTransport();
+}
+
 // ListModels رسمی — models.list با صفحه‌بندی؛ فقط مدل‌های generateContent
-async function fetchGeminiModelsList(apiKey: string): Promise<GeminiModelInfo[]> {
+async function fetchGeminiModelsList(
+  apiKey: string,
+  tr?: GeminiTransport
+): Promise<GeminiModelInfo[]> {
   const models: GeminiModelInfo[] = [];
   let pageToken: string | undefined;
 
   // تا ۳ صفحه × ۱۰۰ — کل کاتالوگ عمومی گوگل معمولاً زیر ۱۰۰ مدل است.
   for (let page = 0; page < 3; page++) {
-    const url = new URL("https://generativelanguage.googleapis.com/v1beta/models");
-    url.searchParams.set("pageSize", "100");
-    if (pageToken) url.searchParams.set("pageToken", pageToken);
+    const qs = new URLSearchParams({ pageSize: "100" });
+    if (pageToken) qs.set("pageToken", pageToken);
 
-    const res = await fetch(url, {
+    const res = await geminiFetch(`/v1beta/models?${qs.toString()}`, {
       headers: { "x-goog-api-key": apiKey },
       signal: AbortSignal.timeout(20_000),
-    });
+    }, tr);
     const json = (await res.json().catch(() => null)) as {
       models?: Array<{
         name?: string;
