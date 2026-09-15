@@ -697,3 +697,23 @@ Stage Summary:
   2. انتقال ۴ کتاب نمایشی دیگر (دکمه آماده) — اختیاری.
   3. کتاب فیزیک TTS ناموفق خارجی (z-ai 500) — بازتولید بعدی.
   4. Milestone I (rate-limit/صفحه‌بندی/پشتیبان)، نقش PARENT، لیدربورد، Bale — طبق PROJECT.md.
+
+---
+Task ID: 24
+Agent: Main Orchestrator (Z.ai Code)
+Task: Round 24 — باگ ورود «ایمیل یا رمز عبور نادرست است» روی حساب‌های نمونه + بازیابی سلامت دیتابیس + دو مکانیزم خودترمیمی
+
+Work Log:
+- DIAGNOSIS: dev.log نشان می‌داد POST /api/v1/auth/login → 409 (INVALID_CREDENTIALS از services/identity.ts). بررسی مستقیم DB (db/custom.db با bun+Prisma): جدول User کاملاً خالی — کل دیتابیس پاک شده بود (۰ کاربر، ۰ تنظیم، ۰ کتاب). علت احتمالی: db:push مخرب در راند قبل (SQLite در تغییرات شکستافرا schema جدول‌ها را drop/recreate می‌کند). صفحه ورود ۴ کارت حساب نمونه را تبلیغ می‌کرد ولی هیچ‌کدام وجود نداشتند.
+- FIX 1 (داده): scripts/seed.ts کامل اجرا شد → tenant/school/۴ حساب قهرمان (owner@platform.ir, admin@school.ir, teacher@school.ir, student@school.ir — رمز ۱۲۳۴۵۶) + ۵ دانش‌آموز اضافه + کلاس ریاضی + آزمون ۵ سوالی + ۲ تکلیف + ۵ attempt واقعی + فلگ‌ها. curl: هر ۴ لاگین 200 با توکن.
+- FIX 2 (خودترمیمی کاربران): سرویس جدید src/server/services/demo-ensure.ts — ensureDemoData() اگر user.count()===0 باشد حساب‌های نمونه + tenant/school/plans/feature-flags را بازمی‌سازد (idempotent، race-safe با singleton promise، خطا فقط لاگ). در مسیر POST /api/v1/auth/login قبل از authenticate فراخوانی می‌شود → پاک‌شدن آیندهٔ DB هرگز ورود وب را نمی‌کشد.
+- FIX 3 (خودترمیمی رازهای حیاتی): کشف مهم — توکن بات تلگرام و کلید جمینای فقط در جدول PlatformSetting بودند و با پاک‌شدن DB از بین رفتند (بات در حالت «waiting»، بدون دسترسی به getUpdates). غیرقابل بازیابی از git (db/custom.db هرگز commit نشده). سرویس جدید src/server/services/settings-backup.ts: آینهٔ فایلی db/settings-backup.json (gitignore شد) از توکن بات/کلید جمینای/miniAppUrl/botUsername؛ updateSettings بعد از ذخیره mirror می‌نویسد؛ getSettings اگر DB خالی بود از mirror بازیابی و upsert می‌کند (لوگ 🛡). تست round-trip با توکن فیک: wipe → restore ✅ → پاک‌سازی کامل (DB و فایل هر دو خالی، سرور زنده).
+- QA (agent-browser): / رندر کامل؛ quick-login «دانش‌آموز» → داشبورد «امروز» سارا احمدی با ۲ تکلیف باز واقعی ✓؛ خروج → quick-login «مدیر کل پلتفرم» → پنل کامل با ۱۱ ناوبری ✓؛ صفحه «تنظیمات و اتصالها» → کارت «اتصال ربات تلگرام» با اینپوت توکن و راهنمای BotFather ✓ («توکنی ذخیره نشده است»). dev.log سالم؛ bun run lint صفر خطا.
+- پاک‌سازی: اسکریپت‌های موقت حذف شدند.
+
+Stage Summary:
+- باگ ورود ریشه‌یابی و رفع شد: دیتابیس کاملاً خالی بود؛ seed کامل اجرا شد و ورود هر ۴ حساب نمونه در مرورگر E2E تأیید شد.
+- دو سپر خودترمیمی اضافه شد: (۱) ensureDemoData در مسیر لاگین؛ (۲) آینهٔ فایلی تنظیمات حساس + بازیابی خودکار — db:pushهای آینده دیگر داده‌های حیاتی را نمی‌کشند.
+- 🔴 اقدام لازم از مدیر: توکن بات تلگرام برای همیشه از بین رفته — باید در «تنظیمات و اتصالها» (با مدیر کل) توکن جدید @BotFather را وارد و ذخیره کند؛ بات mini-service (در حال اجرا، پیکربندی را هر ~۳۰ث می‌گیرد) خودکار ظرف ~۳۰ ثانیه دوباره فعال می‌شود. از این به بعد توکن در فایل mirror هم می‌ماند و قابل بازیابی است.
+- داده‌های ازدست‌رفتهٔ دیگر: کتاب‌ها/assets تلگرامی قبلی (۱۰ asset راند ۲۳)، اتصالات تلگرامی کاربران (ExternalIdentity)، شماره‌های ثبت‌شده — همه باید دوباره ساخته/اتصال یابند (کتاب نمونه با دکمه انتقال/آپلود مجدد).
+- REMAINING: مدیر توکن را دوباره ثبت کند؛ تست واقعی بات در تلگرام؛ Milestone I طبق PROJECT.md.

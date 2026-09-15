@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { ok, handler } from "@/server/core/respond";
 import { Errors } from "@/server/core/errors";
 import { login } from "@/server/services/identity";
+import { ensureDemoData } from "@/server/services/demo-ensure";
 
 export const dynamic = "force-dynamic";
 
@@ -11,6 +12,11 @@ export const POST = handler(async (req: NextRequest) => {
   const password = typeof body?.password === "string" ? body.password : "";
   if (!email || !password || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email))
     throw Errors.validation("ایمیل یا رمز عبور معتبر نیست.");
+
+  // Self-heal: اگر دیتابیس خالی شده باشد (مثلاً بعد از db push)، حساب‌های
+  // نمونه پیش از احراز هویت بازسازی می‌شوند تا ورود وب هرگز شکست نخورد.
+  await ensureDemoData();
+
   const result = await login(email, password);
 
   const res = ok({ token: result.token, expiresAt: result.expiresAt, user: result.user, dashboard: result.dashboard });

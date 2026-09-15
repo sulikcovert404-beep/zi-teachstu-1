@@ -2,6 +2,7 @@ import { db } from "@/lib/db";
 import { fromJson, toJson } from "@/server/core/json";
 import { Errors } from "@/server/core/errors";
 import { audit } from "./audit";
+import { readSettingsBackup, writeSettingsBackup, pickBackupValues } from "./settings-backup";
 import type { AuthContext } from "@/server/auth/session";
 
 // Round 16 — Platform settings store (key/value JSON in PlatformSetting table).
@@ -71,13 +72,55 @@ export async function getSettings(): Promise<PlatformSettings> {
 
   const provider = g<string>(KEYS.aiProvider, DEFAULT_SETTINGS.aiProvider);
   const model = g<string>(KEYS.geminiModel, DEFAULT_SETTINGS.geminiModel);
+  let geminiApiKey = g<string>(KEYS.geminiApiKey, "");
+  let telegramBotToken = g<string>(KEYS.telegramBotToken, "");
+  let telegramMiniAppUrl = g<string>(KEYS.telegramMiniAppUrl, "");
+  let telegramBotUsername = g<string>(KEYS.telegramBotUsername, "");
+
+  // ── Round 24 — Self-heal from the file mirror ──
+  // اگر جدول تنظیمات خالی/پاک شده باشد (مثلاً بعد از db push) و رازهای حیاتی
+  // در آینهٔ فایلی موجود باشند، به دیتابیس بازگردانده می‌شوند تا بات تلگرام و
+  // ارائه‌دهندهٔ جمینای بدون دخالت مدیر دوباره زنده شوند.
+  if (!geminiApiKey || !telegramBotToken) {
+    const backup = await readSettingsBackup();
+    const restore: Array<[string, string]> = [];
+    if (!telegramBotToken && backup.telegramBotToken) {
+      telegramBotToken = backup.telegramBotToken;
+      restore.push([KEYS.telegramBotToken, toJson(telegramBotToken)]);
+    }
+    if (!geminiApiKey && backup.geminiApiKey) {
+      geminiApiKey = backup.geminiApiKey;
+      restore.push([KEYS.geminiApiKey, toJson(geminiApiKey)]);
+    }
+    if (!telegramMiniAppUrl && backup.telegramMiniAppUrl) {
+      telegramMiniAppUrl = backup.telegramMiniAppUrl;
+      restore.push([KEYS.telegramMiniAppUrl, toJson(telegramMiniAppUrl)]);
+    }
+    if (!telegramBotUsername && backup.telegramBotUsername) {
+      telegramBotUsername = backup.telegramBotUsername;
+      restore.push([KEYS.telegramBotUsername, toJson(telegramBotUsername)]);
+    }
+    if (restore.length) {
+      console.warn(
+        `[settings] 🛡 بازیابی ${restore.length} تنظیم حساس از آینهٔ فایلی (توکن بات/کلید جمینای).`
+      );
+      await db
+        .$transaction(
+          restore.map(([key, value]) =>
+            db.platformSetting.upsert({ where: { key }, create: { key, value }, update: { value } })
+          )
+        )
+        .catch((e) => console.error("[settings] restore-from-backup failed:", e));
+    }
+  }
+
   return {
     aiProvider: provider === "gemini" ? "gemini" : "zai",
-    geminiApiKey: g<string>(KEYS.geminiApiKey, ""),
+    geminiApiKey,
     geminiModel: isGeminiModel(model) ? model : DEFAULT_SETTINGS.geminiModel,
-    telegramBotToken: g<string>(KEYS.telegramBotToken, ""),
-    telegramMiniAppUrl: g<string>(KEYS.telegramMiniAppUrl, ""),
-    telegramBotUsername: g<string>(KEYS.telegramBotUsername, ""),
+    telegramBotToken,
+    telegramMiniAppUrl,
+    telegramBotUsername,
     booksUploadTenants: g<string[]>(KEYS.booksUploadTenants, []),
     teacherBookUploadTenants: g<string[]>(KEYS.teacherBookUploadTenants, []),
     telegramStorageEnabled: g<boolean>(KEYS.telegramStorageEnabled, true),
@@ -213,6 +256,11 @@ export async function updateSettings(ctx: AuthContext, input: SettingsUpdateInpu
       })
     );
   }
+
+  // Round 24 — mirror critical secrets to the file backup so a DB wipe
+  // (prisma db push) can never permanently kill the bot token / gemini key.
+  const effective = await getSettings();
+  await writeSettingsBackup(pickBackupValues(effective));
 
   await audit({
     actorId: ctx.userId,

@@ -54,6 +54,7 @@ server.log
 /skills/
 # Round 19 — keep the public repo a clean source snapshot (no runtime data / local artifacts)
 db/*.db
+db/settings-backup.json
 /storage/
 /download/
 /tmp-pdf/
