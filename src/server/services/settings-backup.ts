@@ -15,6 +15,11 @@ export interface SettingsBackup {
   // Round 27 — پروکسی خروجی جمینای؛ برای مهاجرت بین میزبان‌ها حیاتی است —
   // همراه بقیه در آینه نگه داشته می‌شود (ممکن است شامل رمز پروکسی باشد).
   geminiProxyUrl?: string;
+  // Round 28 — گویندهٔ Gemini TTS (مدل/صدا/لحن) برای بقای تنظیم صدا در مهاجرت
+  geminiTtsEnabled?: boolean;
+  geminiTtsModel?: string;
+  geminiTtsVoice?: string;
+  geminiTtsStylePrompt?: string;
   telegramBotToken?: string;
   telegramMiniAppUrl?: string;
   telegramBotUsername?: string;
@@ -58,6 +63,10 @@ export function pickBackupValues(s: {
   geminiApiKey: string;
   geminiModel: string;
   geminiProxyUrl: string;
+  geminiTtsEnabled: boolean;
+  geminiTtsModel: string;
+  geminiTtsVoice: string;
+  geminiTtsStylePrompt: string;
   telegramBotToken: string;
   telegramMiniAppUrl: string;
   telegramBotUsername: string;
@@ -69,6 +78,10 @@ export function pickBackupValues(s: {
     geminiApiKey: s.geminiApiKey ?? "",
     geminiModel: s.geminiModel || "gemini-flash-latest",
     geminiProxyUrl: s.geminiProxyUrl ?? "",
+    geminiTtsEnabled: s.geminiTtsEnabled,
+    geminiTtsModel: s.geminiTtsModel || "gemini-2.5-flash-preview-tts",
+    geminiTtsVoice: s.geminiTtsVoice || "Kore",
+    geminiTtsStylePrompt: s.geminiTtsStylePrompt ?? "",
     telegramBotToken: s.telegramBotToken ?? "",
     telegramMiniAppUrl: s.telegramMiniAppUrl ?? "",
     telegramBotUsername: s.telegramBotUsername ?? "",

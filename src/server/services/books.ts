@@ -28,13 +28,12 @@ import { isLevelCode, levelLabel, isValidGradeForLevel } from "@/lib/education-l
 import type { AuthContext } from "@/server/auth/session";
 
 // Round 16 + Round 18 — Smart Library (کتاب‌خانه هوشمند).
-// Uploading a book (structured as دوره → پایه → درس) triggers an async generation
-// pipeline: markdown summary → structured study notes (جزوه) → four sample-question
-// models (MC / true-false / fill-in-blank / short) → educational SVG figures → spoken
-// podcast (WAV on disk). Every AI call flows through the central gateway with metering;
-// failures are per-artifact (PARTIAL) and retryable, never silent (spec §10/§99).
-// Round 18: platform books are student-visible immediately; school/teacher uploads
-// wait for SUPER_ADMIN approval before students can see them.
+// Round 28 — معماری درس‌محور (خواستهٔ مدیر): آپلود کتاب «فقط» تشخیص ساختار را اجرا
+// می‌کند (چند درس/فصل/پودمان/مهارت دارد)؛ خلاصه/جزوه/سؤال/شکل/پادکست دیگر برای
+// «کل کتاب» ساخته نمی‌شود بلکه «برای هر درس» و به‌صورت تنبل: اولین کاربری که درسی
+// را انتخاب کند تولید را شروع می‌کند (claim اتمیک)، بقیه نتیجهٔ ذخیره‌شده را فوراً
+// می‌گیرند. پرامپت‌های همهٔ کارها سن‌سنجیده‌اند (بلوک سن بر اساس دورهٔ تحصیلی کتاب).
+// کتاب‌های قدیمی که از قبل محتوای کل‌کتاب دارند روی مسیر قبلی می‌مانند (سازگاری کامل).
 
 const STORAGE_DIR = path.join(process.cwd(), "storage", "books");
 const BOOK_TEXT_MIN = 800;
@@ -138,13 +137,10 @@ export async function createBook(ctx: AuthContext, input: CreateBookInput) {
     classroomId = classroom.id;
   }
 
-  // Teacher uploads consume their own daily feature quotas (1 book = 2 summarizer
-  // [summary + جزوه] + 2 question generator [quiz + figures] + 1 podcast). Admins are
-  // operations-side (no quota).
+  // Round 28 — رزرو سهمیهٔ آپلود سبک‌تر شد: فقط «یک» فراخوانی تشخیص ساختار (SUMMARIZER)
+  // در لحظهٔ آپلود مصرف می‌شود؛ تولید محتوای هر درس جدا و در لحظهٔ اولین انتخاب است.
   if (ctx.effectiveRole === ROLES.TEACHER && ctx.tenantId) {
     await requireFeature(ctx, FEATURES.SUMMARIZER);
-    await requireFeature(ctx, FEATURES.QUESTION_GENERATOR);
-    await requireFeature(ctx, FEATURES.PODCAST);
   }
 
   const isPlatform = ctx.effectiveRole === ROLES.SUPER_ADMIN;
@@ -199,17 +195,18 @@ export async function createBook(ctx: AuthContext, input: CreateBookInput) {
     },
   });
 
-  // fire-and-forget generation; statuses land on the book row as they complete
-  void generateBookArtifacts(book.id).catch(async (e) => {
+  // fire-and-forget: Round 28 — آپلود فقط «تشخیص درس‌ها» را اجرا می‌کند (سریع و ارزان)؛
+  // تولید محتوا به اولین انتخابِ هر درس موکول شده است (تولید تنبل درس‌محور).
+  void detectBookLessons(book.id).catch(async (e) => {
     await db.book
       .update({
         where: { id: book.id },
-        data: { status: "FAILED", errorReason: e instanceof Error ? e.message.slice(0, 200) : "unknown" },
+        data: { status: "FAILED", lessonsStatus: "FAILED", errorReason: e instanceof Error ? e.message.slice(0, 200) : "unknown" },
       })
       .catch(() => undefined);
   });
 
-  return bookSummary(created);
+  return bookSummary({ ...created, lessonsCount: 0 });
 }
 
 export async function reviewBookApproval(
@@ -255,13 +252,298 @@ async function generateBookArtifacts(bookId: string) {
   await refreshBookStatus(bookId);
 }
 
-async function generateArtifact(book: { id: string; title: string; subject: string | null; gradeLevel: string | null; level: string | null; author: string | null; contentText: string; tenantId: string | null; addedById: string }, kind: ArtifactKind) {
-  const bookId = book.id;
+// ───────────────────────── Round 28 — تشخیص درس‌ها (تنها کار آپلود) ─────────────────────────
+
+interface DetectedUnit {
+  index: number;
+  title: string;
+  topics?: string[];
+}
+
+/** JSON مقاوم: فهرست واحدها را از پاسخ AI بیرون می‌کشد حتی اگر wrapper/متن اضافه داشته باشد */
+function parseDetectedUnits(raw: string): { unitKind: string; units: DetectedUnit[] } | null {
+  const s = raw.replace(/```json/gi, "").replace(/```/g, "").trim();
+  const tryParse = (txt: string): { unitKind: string; units: DetectedUnit[] } | null => {
+    let j: unknown;
+    try {
+      j = JSON.parse(txt);
+    } catch {
+      return null;
+    }
+    if (!j || typeof j !== "object") return null;
+    const obj = j as Record<string, unknown>;
+    if (!Array.isArray(obj.units)) return null;
+    const units: DetectedUnit[] = [];
+    obj.units.slice(0, 40).forEach((u, i) => {
+      if (!u || typeof u !== "object") return;
+      const o = u as Record<string, unknown>;
+      if (typeof o.title !== "string" || !o.title.trim() || o.title.trim().length > 120) return;
+      units.push({
+        index: typeof o.index === "number" ? o.index : i + 1,
+        title: o.title,
+        topics: Array.isArray(o.topics)
+          ? o.topics.filter((t): t is string => typeof t === "string").slice(0, 4)
+          : undefined,
+      });
+    });
+    if (units.length === 0) return null;
+    return {
+      unitKind: typeof obj.unitKind === "string" && obj.unitKind.trim() ? obj.unitKind.trim() : "درس",
+      units,
+    };
+  };
+  const direct = tryParse(s);
+  if (direct) return direct;
+  // fallback: اولین { … } متوازن را بیرون بکش
+  const start = s.indexOf("{");
+  const end = s.lastIndexOf("}");
+  if (start >= 0 && end > start) {
+    const inner = tryParse(s.slice(start, end + 1));
+    if (inner) return inner;
+  }
+  return null;
+}
+
+/**
+ * تشخیص ساختار کتاب: تنها فراخوانی AI هنگام آپلود (خواستهٔ مدیر).
+ * خروجی: ردیف‌های BookLesson با وضعیت PENDING — تولید محتوای هر درس تنبل است.
+ * fallback: اگر AI شکست خورد، یک واحد «کل کتاب» ساخته می‌شود تا پلتفرم قابل استفاده بماند.
+ */
+export async function detectBookLessons(bookId: string): Promise<void> {
+  const book = await db.book.findUnique({ where: { id: bookId } });
+  if (!book) return;
+  await db.book.update({ where: { id: bookId }, data: { lessonsStatus: "GENERATING", status: "GENERATING", errorReason: null } });
+
+  let unitKind = "درس";
+  let units: DetectedUnit[] = [];
+  try {
+    const ai = await aiComplete({
+      feature: FEATURES.SUMMARIZER,
+      systemPrompt: PROMPTS.bookLessons.build(book.title),
+      userMessage: `متن کامل کتاب:\n\n${book.contentText.slice(0, 50_000)}`,
+      tenantId: book.tenantId,
+      userId: book.addedById,
+      maxOutputChars: 8_000,
+      temperature: 0.2,
+    });
+    const parsed = parseDetectedUnits(ai.content);
+    if (parsed && parsed.units.length > 0) {
+      unitKind = parsed.unitKind.slice(0, 20);
+      units = parsed.units;
+    }
+  } catch (e) {
+    console.error(`[books] lesson detection failed for ${bookId}: ${e instanceof Error ? e.message : e}`);
+  }
+
+  if (units.length === 0) {
+    // fallback: کل کتاب به‌عنوان یک واحد — پلتفرم همیشه قابل استفاده می‌ماند
+    unitKind = "کل کتاب";
+    units = [{ index: 1, title: "کل کتاب" }];
+  }
+
+  // درس‌های قبلی (در صورت retry) را پاک کن و از نو بساز
+  await db.bookLesson.deleteMany({ where: { bookId } });
+  await db.bookLesson.createMany({
+    data: units.map((u, i) => ({
+      bookId,
+      order: i + 1,
+      title: u.title.trim().slice(0, 120),
+      kind: unitKind,
+      status: "PENDING",
+    })),
+  });
+
+  await db.book.update({
+    where: { id: bookId },
+    data: { lessonsStatus: "READY", lessonsKind: unitKind, status: "READY" },
+  });
+}
+
+// ───────────────────────── Round 28 — تولید تنبل درس‌محور ─────────────────────────
+
+/** شکل مشترک کتاب/درس برای پرامپت‌های سن‌سنج */
+function promptCtxFor(
+  book: { title: string; subject: string | null; gradeLevel: string | null; level: string | null },
+  lesson?: { order: number; title: string; kind: string } | null
+) {
+  return {
+    title: book.title,
+    subject: book.subject,
+    grade: book.gradeLevel,
+    level: book.level,
+    lesson: lesson ?? null,
+  };
+}
+
+async function generateLessonArtifact(
+  book: { id: string; title: string; subject: string | null; gradeLevel: string | null; level: string | null; author: string | null; contentText: string; tenantId: string | null; addedById: string },
+  lesson: { id: string; order: number; title: string; kind: string },
+  kind: ArtifactKind
+) {
+  const ctx = promptCtxFor(book, lesson);
+  const lessonId = lesson.id;
   try {
     if (kind === "summary") {
       const ai = await aiComplete({
         feature: FEATURES.SUMMARIZER,
-        systemPrompt: PROMPTS.bookSummary.build(book.title, book.subject, book.gradeLevel),
+        systemPrompt: PROMPTS.bookSummary.build(ctx),
+        userMessage: `متن کامل کتاب «${book.title}» (برای پردازش ${lesson.kind} ${lesson.order} — «${lesson.title}»):\n\n${book.contentText.slice(0, 50_000)}`,
+        tenantId: book.tenantId,
+        userId: book.addedById,
+        maxOutputChars: 12_000,
+      });
+      await db.bookLesson.update({ where: { id: lessonId }, data: { summary: ai.content, summaryStatus: "READY" } });
+    } else if (kind === "notes") {
+      const ai = await aiComplete({
+        feature: FEATURES.SUMMARIZER,
+        systemPrompt: PROMPTS.bookStudyNotes.build(ctx),
+        userMessage: `متن کامل کتاب «${book.title}» (برای پردازش ${lesson.kind} ${lesson.order} — «${lesson.title}»):\n\n${book.contentText.slice(0, 50_000)}`,
+        tenantId: book.tenantId,
+        userId: book.addedById,
+        maxOutputChars: 10_000,
+      });
+      await db.bookLesson.update({ where: { id: lessonId }, data: { studyNotes: ai.content, studyNotesStatus: "READY" } });
+    } else if (kind === "quiz") {
+      const ai = await aiComplete({
+        feature: FEATURES.QUESTION_GENERATOR,
+        systemPrompt: PROMPTS.bookQuiz.build(ctx),
+        userMessage: `متن کامل کتاب «${book.title}» (برای پردازش ${lesson.kind} ${lesson.order} — «${lesson.title}»):\n\n${book.contentText.slice(0, 50_000)}`,
+        tenantId: book.tenantId,
+        userId: book.addedById,
+        maxOutputChars: 18_000,
+      });
+      const quiz = parseBookQuiz(ai.content);
+      if (!quiz) throw new Error("QUIZ_PARSE_FAILED");
+      await db.bookLesson.update({
+        where: { id: lessonId },
+        data: {
+          quiz: toJson(quiz),
+          quizStatus: "READY",
+          quizCount: quiz.mc.length + quiz.tf.length + quiz.fb.length + quiz.short.length,
+        },
+      });
+    } else if (kind === "figures") {
+      const ai = await aiComplete({
+        feature: FEATURES.QUESTION_GENERATOR,
+        systemPrompt: PROMPTS.bookFigures.build(ctx),
+        userMessage: `متن کامل کتاب «${book.title}» (برای پردازش ${lesson.kind} ${lesson.order} — «${lesson.title}»):\n\n${book.contentText.slice(0, 30_000)}`,
+        tenantId: book.tenantId,
+        userId: book.addedById,
+        maxOutputChars: 12_000,
+      });
+      const figures = parseBookFigures(ai.content);
+      await db.bookLesson.update({
+        where: { id: lessonId },
+        data: { figures: toJson(figures), figuresStatus: "READY", figuresCount: figures.length },
+      });
+    } else {
+      // پادکست درس — متن سن‌سنج + گویندهٔ Gemini TTS (صدا/لحن ادمین بر اساس دورهٔ تحصیلی)
+      const scriptAi = await aiComplete({
+        feature: FEATURES.SUMMARIZER,
+        systemPrompt: PROMPTS.bookPodcastScript.build(ctx),
+        userMessage: `متن کامل کتاب «${book.title}» (برای پردازش ${lesson.kind} ${lesson.order} — «${lesson.title}»):\n\n${book.contentText.slice(0, 30_000)}`,
+        tenantId: book.tenantId,
+        userId: book.addedById,
+        maxOutputChars: 3_200,
+      });
+      const script = scriptAi.content.slice(0, 3000);
+      const spoken = await aiSpeak({
+        feature: FEATURES.PODCAST,
+        text: script,
+        tenantId: book.tenantId,
+        userId: book.addedById,
+        levelHint: book.level,
+      });
+      await fs.mkdir(STORAGE_DIR, { recursive: true });
+      const filePath = path.join(STORAGE_DIR, `lesson-${lessonId}.wav`);
+      await fs.writeFile(filePath, spoken.audio);
+      const stored = await uploadTelegramAsset({
+        bookId: book.id,
+        kind: `PODCAST_AUDIO_L:${lessonId}` as TelegramAssetKind,
+        bytes: spoken.audio,
+        fileName: `podcast-${safeFileName(book.title)}-${lesson.order}.wav`,
+        asAudio: true,
+        audioMeta: {
+          title: `پادکست ${lesson.kind} ${lesson.order} — ${book.title}`.slice(0, 60),
+          performer: "پلتفرم آموزش هوشمند ایران",
+          durationSec: spoken.durationSec,
+        },
+        caption: `🎙 پادکست ${lesson.kind} ${lesson.order} «${lesson.title}» از کتاب «${book.title}»`,
+      });
+      if (stored) {
+        await fs.rm(filePath, { force: true }).catch(() => undefined);
+        await db.bookLesson.update({
+          where: { id: lessonId },
+          data: { podcastPath: null, podcastTelegram: true, podcastStatus: "READY", podcastDurationSec: spoken.durationSec },
+        });
+      } else {
+        await db.bookLesson.update({
+          where: { id: lessonId },
+          data: { podcastPath: filePath, podcastTelegram: false, podcastStatus: "READY", podcastDurationSec: spoken.durationSec },
+        });
+      }
+    }
+  } catch (e) {
+    await markLessonArtifactFailed(lessonId, lessonArtifactStatusField(kind), e);
+  }
+}
+
+function lessonArtifactStatusField(kind: ArtifactKind): "summaryStatus" | "studyNotesStatus" | "quizStatus" | "figuresStatus" | "podcastStatus" {
+  switch (kind) {
+    case "summary":
+      return "summaryStatus";
+    case "notes":
+      return "studyNotesStatus";
+    case "quiz":
+      return "quizStatus";
+    case "figures":
+      return "figuresStatus";
+    default:
+      return "podcastStatus";
+  }
+}
+
+async function markLessonArtifactFailed(
+  lessonId: string,
+  field: "summaryStatus" | "studyNotesStatus" | "quizStatus" | "figuresStatus" | "podcastStatus",
+  e: unknown
+) {
+  console.error(`[books] lesson artifact ${field} failed for ${lessonId}: ${e instanceof Error ? e.message : e}`);
+  await db.bookLesson
+    .update({ where: { id: lessonId }, data: { [field]: "FAILED" } as Record<string, string> })
+    .catch(() => undefined);
+}
+
+async function refreshLessonStatus(lessonId: string) {
+  const lesson = await db.bookLesson.findUnique({ where: { id: lessonId } });
+  if (!lesson) return;
+  const statuses = [lesson.summaryStatus, lesson.studyNotesStatus, lesson.quizStatus, lesson.figuresStatus, lesson.podcastStatus];
+  const ready = statuses.filter((s) => s === "READY").length;
+  const status = ready === statuses.length ? "READY" : ready > 0 ? "PARTIAL" : "FAILED";
+  await db.bookLesson.update({ where: { id: lessonId }, data: { status } }).catch(() => undefined);
+}
+
+async function generateLessonArtifacts(bookId: string, lessonId: string) {
+  const [book, lesson] = await Promise.all([
+    db.book.findUnique({ where: { id: bookId } }),
+    db.bookLesson.findUnique({ where: { id: lessonId } }),
+  ]);
+  if (!book || !lesson || lesson.bookId !== bookId) return;
+  for (const kind of ARTIFACT_KINDS) {
+    await generateLessonArtifact(book, lesson, kind);
+  }
+  await refreshLessonStatus(lessonId);
+}
+
+async function generateArtifact(book: { id: string; title: string; subject: string | null; gradeLevel: string | null; level: string | null; author: string | null; contentText: string; tenantId: string | null; addedById: string }, kind: ArtifactKind) {
+  const bookId = book.id;
+  // Round 28 — پرامپت‌های سن‌سنج (مسیر قدیمیِ کل‌کتاب برای کتاب‌های legacy)
+  const ctx = promptCtxFor(book, null);
+  try {
+    if (kind === "summary") {
+      const ai = await aiComplete({
+        feature: FEATURES.SUMMARIZER,
+        systemPrompt: PROMPTS.bookSummary.build(ctx),
         userMessage: `متن کامل کتاب:\n\n${book.contentText.slice(0, 50_000)}`,
         tenantId: book.tenantId,
         userId: book.addedById,
@@ -275,7 +557,7 @@ async function generateArtifact(book: { id: string; title: string; subject: stri
     } else if (kind === "notes") {
       const ai = await aiComplete({
         feature: FEATURES.SUMMARIZER,
-        systemPrompt: PROMPTS.bookStudyNotes.build(book.title, book.subject, book.gradeLevel),
+        systemPrompt: PROMPTS.bookStudyNotes.build(ctx),
         userMessage: `متن کامل کتاب:\n\n${book.contentText.slice(0, 50_000)}`,
         tenantId: book.tenantId,
         userId: book.addedById,
@@ -288,7 +570,7 @@ async function generateArtifact(book: { id: string; title: string; subject: stri
     } else if (kind === "quiz") {
       const ai = await aiComplete({
         feature: FEATURES.QUESTION_GENERATOR,
-        systemPrompt: PROMPTS.bookQuiz.build(book.title),
+        systemPrompt: PROMPTS.bookQuiz.build(ctx),
         userMessage: `متن کامل کتاب:\n\n${book.contentText.slice(0, 50_000)}`,
         tenantId: book.tenantId,
         userId: book.addedById,
@@ -311,7 +593,7 @@ async function generateArtifact(book: { id: string; title: string; subject: stri
     } else if (kind === "figures") {
       const ai = await aiComplete({
         feature: FEATURES.QUESTION_GENERATOR,
-        systemPrompt: PROMPTS.bookFigures.build(book.title),
+        systemPrompt: PROMPTS.bookFigures.build(ctx),
         userMessage: `متن کامل کتاب:\n\n${book.contentText.slice(0, 30_000)}`,
         tenantId: book.tenantId,
         userId: book.addedById,
@@ -326,7 +608,7 @@ async function generateArtifact(book: { id: string; title: string; subject: stri
       // podcast (script → TTS → WAV on disk)
       const scriptAi = await aiComplete({
         feature: FEATURES.SUMMARIZER,
-        systemPrompt: PROMPTS.bookPodcastScript.build(book.title),
+        systemPrompt: PROMPTS.bookPodcastScript.build(ctx),
         userMessage: `متن کامل کتاب:\n\n${book.contentText.slice(0, 30_000)}`,
         tenantId: book.tenantId,
         userId: book.addedById,
@@ -338,6 +620,7 @@ async function generateArtifact(book: { id: string; title: string; subject: stri
         text: script,
         tenantId: book.tenantId,
         userId: book.addedById,
+        levelHint: book.level,
       });
       await fs.mkdir(STORAGE_DIR, { recursive: true });
       const filePath = path.join(STORAGE_DIR, `${bookId}.wav`);
@@ -490,13 +773,31 @@ async function renderAndUploadArtifactPdf(
   }
 }
 
-export async function regenerateBookArtifact(ctx: AuthContext, bookId: string, kind: ArtifactKind) {
+export async function regenerateBookArtifact(ctx: AuthContext, bookId: string, kind: ArtifactKind | "lessons") {
   const book = await db.book.findUnique({ where: { id: bookId } });
   if (!book) throw Errors.notFound("کتاب");
   if (book.addedById !== ctx.userId && ctx.effectiveRole !== ROLES.SUPER_ADMIN) {
     throw Errors.forbidden("فقط ایجادکنندهٔ کتاب یا مدیر کل می‌تواند بازتولید کند.");
   }
-  if (!ARTIFACT_KINDS.includes(kind)) throw Errors.validation("نوع محتوای درخواستی معتبر نیست.");
+
+  // Round 28 — بازاجرای «تشخیص درس‌ها» (مثلاً بعد از خطای موقت شبکه/پروکسی)
+  if (kind === "lessons") {
+    await db.book.update({
+      where: { id: bookId },
+      data: { lessonsStatus: "GENERATING", status: "GENERATING", errorReason: null },
+    });
+    void detectBookLessons(bookId).catch(async (e) => {
+      await db.book
+        .update({
+          where: { id: bookId },
+          data: { status: "FAILED", lessonsStatus: "FAILED", errorReason: e instanceof Error ? e.message.slice(0, 200) : "unknown" },
+        })
+        .catch(() => undefined);
+    });
+    return { queued: true, kind };
+  }
+
+  if (!ARTIFACT_KINDS.includes(kind as ArtifactKind)) throw Errors.validation("نوع محتوای درخواستی معتبر نیست.");
 
   // Round 23 — assetهای تلگرامیِ مرتبط با این artifact باطل می‌شوند تا نسخهٔ تازه جایگزین شود
   const related: TelegramAssetKind[] =
@@ -829,6 +1130,9 @@ function bookSummary(book: {
   originalPdfName: string | null;
   originalPdfTelegram: boolean;
   podcastTelegram: boolean;
+  lessonsStatus: string;
+  lessonsKind: string | null;
+  lessonsCount: number;
   createdAt: Date;
   tenantId: string | null;
   classroomId: string | null;
@@ -859,6 +1163,10 @@ function bookSummary(book: {
     hasOriginalPdf: Boolean(book.originalPdfPath) || book.originalPdfTelegram,
     originalPdfInTelegram: book.originalPdfTelegram,
     podcastInTelegram: book.podcastTelegram,
+    // Round 28 — معماری درس‌محور
+    lessonsStatus: book.lessonsStatus,
+    lessonsKind: book.lessonsKind,
+    lessonsCount: book.lessonsCount,
     createdAt: book.createdAt,
     scope: book.tenantId ? (book.classroomId ? "CLASSROOM" : "TENANT") : "PLATFORM",
     addedById: book.addedById,
@@ -897,7 +1205,11 @@ export async function listBooks(ctx: AuthContext, levelFilter?: string | null) {
     where,
     orderBy: { createdAt: "desc" },
     take: 100,
-    include: { addedBy: { select: { fullName: true } }, tenant: { select: { name: true } } },
+    include: {
+      addedBy: { select: { fullName: true } },
+      tenant: { select: { name: true } },
+      _count: { select: { lessons: true } },
+    },
   });
 
   // per-user best attempts (for «بهترین رکورد» display)
@@ -914,7 +1226,7 @@ export async function listBooks(ctx: AuthContext, levelFilter?: string | null) {
     canUploadLabel: perm.label,
     role: ctx.effectiveRole,
     books: books.map((b) => ({
-      ...bookSummary(b),
+      ...bookSummary({ ...b, lessonsCount: b._count.lessons }),
       addedByName: b.addedBy?.fullName ?? null,
       tenantName: b.tenant?.name ?? null,
       mine: b.addedById === ctx.userId,
@@ -957,8 +1269,18 @@ export async function getBook(ctx: AuthContext, bookId: string) {
     where: { bookId },
     select: { kind: true, fileId: true },
   });
+  // Round 28 — فهرست درس‌ها (معماری درس‌محور) برای کتاب‌های جدید
+  const lessonRows = await db.bookLesson.findMany({
+    where: { bookId },
+    orderBy: { order: "asc" },
+    select: {
+      id: true, order: true, title: true, kind: true, status: true,
+      summaryStatus: true, studyNotesStatus: true, quizStatus: true, figuresStatus: true, podcastStatus: true,
+      quizCount: true, podcastDurationSec: true,
+    },
+  });
   return {
-    ...bookSummary(book),
+    ...bookSummary({ ...book, lessonsCount: lessonRows.length }),
     addedByName: book.addedBy?.fullName ?? null,
     tenantName: book.tenant?.name ?? null,
     mine: book.addedById === ctx.userId,
@@ -974,6 +1296,7 @@ export async function getBook(ctx: AuthContext, bookId: string) {
           }))
         : [],
     errorReason: book.errorReason,
+    lessons: lessonRows,
     telegramFiles: Object.fromEntries(tgAssets.map((a) => [a.kind, a.fileId])) as Record<string, string>,
     myAttempts: myAttempts.map((a) => ({
       id: a.id,
@@ -983,6 +1306,329 @@ export async function getBook(ctx: AuthContext, bookId: string) {
       pointsAwarded: a.pointsAwarded,
       createdAt: a.createdAt,
     })),
+  };
+}
+
+// ───────────────────────── Round 28 — API عمومی درس‌ها ─────────────────────────
+
+async function visibleLesson(ctx: AuthContext, bookId: string, lessonId: string) {
+  const book = await visibleBook(ctx, bookId);
+  const lesson = await db.bookLesson.findFirst({ where: { id: lessonId, bookId } });
+  if (!lesson) throw Errors.notFound("درس");
+  return { book, lesson };
+}
+
+function lessonPayload(lesson: {
+  id: string; bookId: string; order: number; title: string; kind: string; status: string;
+  summary: string | null; summaryStatus: string;
+  studyNotes: string | null; studyNotesStatus: string;
+  quiz: string | null; quizStatus: string; quizCount: number;
+  figures: string | null; figuresStatus: string; figuresCount: number;
+  podcastStatus: string; podcastDurationSec: number | null; podcastTelegram: boolean;
+  errorReason: string | null; generatedById: string | null; firstAccessAt: Date | null;
+}) {
+  return {
+    id: lesson.id,
+    bookId: lesson.bookId,
+    order: lesson.order,
+    title: lesson.title,
+    kind: lesson.kind,
+    status: lesson.status,
+    summary: lesson.summaryStatus === "READY" ? lesson.summary : null,
+    summaryStatus: lesson.summaryStatus,
+    studyNotes: lesson.studyNotesStatus === "READY" ? lesson.studyNotes : null,
+    studyNotesStatus: lesson.studyNotesStatus,
+    quizStatus: lesson.quizStatus,
+    quizCount: lesson.quizCount,
+    quizModels:
+      lesson.quizStatus === "READY" && lesson.quiz
+        ? (["mc", "tf", "fb", "short"] as const).map((k) => ({
+            kind: k,
+            label: k === "mc" ? "چهارگزینه‌ای" : k === "tf" ? "درست/غلط" : k === "fb" ? "جای خالی" : "تشریحی کوتاه",
+            count: parseQuiz(lesson.quiz)[k].length,
+          }))
+        : [],
+    figures: lesson.figuresStatus === "READY" ? fromJson<BookFigure[]>(lesson.figures, []) : [],
+    figuresStatus: lesson.figuresStatus,
+    figuresCount: lesson.figuresCount,
+    podcastStatus: lesson.podcastStatus,
+    podcastDurationSec: lesson.podcastDurationSec,
+    podcastInTelegram: lesson.podcastTelegram,
+    errorReason: lesson.errorReason,
+    generatedById: lesson.generatedById,
+    firstAccessAt: lesson.firstAccessAt,
+  };
+}
+
+/**
+ * GET درس — قلب معماری تنبل (خواستهٔ مدیر):
+ * اولین انتخاب‌کننده claim اتمیک می‌گیرد (PENDING→GENERATING) و تولید شروع می‌شود؛
+ * انتخاب‌کننده‌های بعدی وضعیت/محتوای موجود را فوراً می‌گیرند (poll تا READY).
+ */
+export async function getBookLesson(ctx: AuthContext, bookId: string, lessonId: string) {
+  const { book, lesson } = await visibleLesson(ctx, bookId, lessonId);
+
+  if (lesson.status === "PENDING") {
+    // claim اتمیک — فقط یکی برنده است؛ بقیه همان وضعیت GENERATED را می‌بینند
+    const claimed = await db.bookLesson.updateMany({
+      where: { id: lessonId, status: "PENDING" },
+      data: { status: "GENERATING", generatedById: ctx.userId, firstAccessAt: new Date(), errorReason: null },
+    });
+    if (claimed.count === 1) {
+      void generateLessonArtifacts(bookId, lessonId).catch((e) =>
+        console.error(`[books] lesson generation crashed for ${lessonId}: ${e instanceof Error ? e.message : e}`)
+      );
+    }
+    const fresh = await db.bookLesson.findUnique({ where: { id: lessonId } });
+    return {
+      ...lessonPayload(fresh ?? lesson),
+      bookTitle: book.title,
+      level: book.level,
+      levelLabel: levelLabel(book.level),
+      gradeLevel: book.gradeLevel,
+      subject: book.subject,
+    };
+  }
+
+  return {
+    ...lessonPayload(lesson),
+    bookTitle: book.title,
+    level: book.level,
+    levelLabel: levelLabel(book.level),
+    gradeLevel: book.gradeLevel,
+    subject: book.subject,
+  };
+}
+
+/** بازتولید یک مصنوع درس — مجاز برای ایجادکنندهٔ کتاب/مدیر کل همیشه؛ بقیه فقط وقتی FAILED */
+export async function regenerateLessonArtifact(ctx: AuthContext, bookId: string, lessonId: string, kind: ArtifactKind) {
+  const { book, lesson } = await visibleLesson(ctx, bookId, lessonId);
+  if (!ARTIFACT_KINDS.includes(kind)) throw Errors.validation("نوع محتوای درخواستی معتبر نیست.");
+  const isManager = book.addedById === ctx.userId || ctx.effectiveRole === ROLES.SUPER_ADMIN;
+  const field = lessonArtifactStatusField(kind);
+  if (!isManager && lesson[field] !== "FAILED") {
+    throw Errors.forbidden("بازتولید فقط وقتی محتوا ناموفق بوده یا توسط ایجادکنندهٔ کتاب/مدیر کل ممکن است.");
+  }
+  if (kind === "podcast") {
+    await invalidateTelegramAsset(bookId, `PODCAST_AUDIO_L:${lessonId}` as TelegramAssetKind);
+    await db.bookLesson.update({ where: { id: lessonId }, data: { podcastTelegram: false } }).catch(() => undefined);
+  }
+  await db.bookLesson.update({
+    where: { id: lessonId },
+    data: { [field]: "PENDING", status: "GENERATING", errorReason: null } as Record<string, string | null>,
+  });
+  void (async () => {
+    await generateLessonArtifact(book, lesson, kind);
+    await refreshLessonStatus(lessonId);
+  })().catch(() => undefined);
+  return { queued: true, kind, lessonId };
+}
+
+/** نمونه‌سؤال‌های یک درس (بدون پاسخ‌ها — تصحیح سمت سرور) */
+export async function getBookLessonQuiz(ctx: AuthContext, bookId: string, lessonId: string, model: string) {
+  const { book, lesson } = await visibleLesson(ctx, bookId, lessonId);
+  if (lesson.quizStatus !== "READY" || !lesson.quiz) {
+    throw Errors.validation("نمونه‌سؤال‌های این درس هنوز آماده نشده است.");
+  }
+  const quizModel = (QUIZ_MODELS as readonly string[]).includes(model) ? (model as QuizModel) : "MC";
+  const quiz = parseQuiz(lesson.quiz);
+  const items = quizItemsForModel(quiz, quizModel);
+  if (items.length === 0) throw Errors.validation("این مدل سؤال برای درس موجود نیست.");
+  return {
+    bookId,
+    lessonId,
+    bookTitle: book.title,
+    lessonTitle: lesson.title,
+    lessonOrder: lesson.order,
+    model: quizModel,
+    modelLabel: quizModelLabel(quizModel),
+    maxScore: items.length,
+    items: items.map((it) => ({
+      id: it.id,
+      kind: it.kind,
+      prompt: it.prompt,
+      options: it.options ?? (it.kind === "tf" ? ["صحیح", "غلط"] : undefined),
+      topic: it.topic ?? null,
+    })),
+  };
+}
+
+/** تصحیح آزمون درس — همان منطق کتاب، با رکورد best جدا برای هر درس */
+export async function submitBookLessonQuiz(
+  ctx: AuthContext,
+  bookId: string,
+  lessonId: string,
+  model: string,
+  answers: Record<string, unknown>
+) {
+  const { book, lesson } = await visibleLesson(ctx, bookId, lessonId);
+  if (lesson.quizStatus !== "READY" || !lesson.quiz) {
+    throw Errors.validation("نمونه‌سؤال‌های این درس هنوز آماده نشده است.");
+  }
+  const quizModel = (QUIZ_MODELS as readonly string[]).includes(model) ? (model as QuizModel) : "MC";
+  const quiz = parseQuiz(lesson.quiz);
+  const items = quizItemsForModel(quiz, quizModel);
+
+  const normAnswers: Record<string, string> = {};
+  for (const [k, v] of Object.entries(answers ?? {})) {
+    if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
+      normAnswers[k] = String(v);
+    }
+  }
+
+  // رکورد بهترین نمره «همین درس» — امتیاز فقط برای بهبود (ضد تکرار)
+  const prevAgg = await db.bookQuizAttempt.aggregate({
+    where: { bookId, lessonId, userId: ctx.userId },
+    _max: { score: true },
+  });
+  const previousBest = prevAgg._max.score ?? 0;
+
+  let score = 0;
+  const maxScore = items.length;
+  const perQuestion: Array<{
+    id: string; kind: string; prompt: string; yourAnswer: string | null;
+    correct: boolean | null; correctAnswer: string; explanation: string | null;
+  }> = [];
+
+  for (const it of items) {
+    const raw = normAnswers[it.id];
+    if (it.kind === "mc") {
+      const chosen = raw === undefined || raw === "" ? null : Number(raw);
+      const ok = chosen !== null && chosen === it.correctIndex;
+      if (ok) score += 1;
+      perQuestion.push({
+        id: it.id, kind: it.kind, prompt: it.prompt,
+        yourAnswer: chosen !== null && it.options ? (it.options[chosen] ?? null) : null,
+        correct: ok,
+        correctAnswer: it.options ? it.options[it.correctIndex ?? 0] : "",
+        explanation: it.explanation ?? null,
+      });
+    } else if (it.kind === "tf") {
+      const normalized = raw === undefined || raw === "" ? null : raw === "true" || raw === "0" ? "true" : "false";
+      const ok = normalized !== null && (normalized === "true") === !!it.correct;
+      if (ok) score += 1;
+      perQuestion.push({
+        id: it.id, kind: it.kind, prompt: it.prompt,
+        yourAnswer: normalized === null ? null : normalized === "true" ? "صحیح" : "غلط",
+        correct: ok,
+        correctAnswer: it.correct ? "صحیح" : "غلط",
+        explanation: it.explanation ?? null,
+      });
+    } else if (it.kind === "fb") {
+      const answered = typeof raw === "string" && raw.trim().length >= 1;
+      const ok = answered && fbMatches(raw, it.answer ?? "");
+      if (ok) score += 1;
+      perQuestion.push({
+        id: it.id, kind: it.kind, prompt: it.prompt,
+        yourAnswer: answered ? raw.trim().slice(0, 200) : null,
+        correct: ok,
+        correctAnswer: it.answer ?? "",
+        explanation: it.explanation ?? null,
+      });
+    } else {
+      const answered = typeof raw === "string" && raw.trim().length >= 1;
+      if (answered) score += 1;
+      perQuestion.push({
+        id: it.id, kind: it.kind, prompt: it.prompt,
+        yourAnswer: typeof raw === "string" ? raw.slice(0, 500) : null,
+        correct: null,
+        correctAnswer: it.referenceAnswer ?? "",
+        explanation: "پاسخ نمونه برای خودآزمایی — پاسخ شما را با آن مقایسه کنید.",
+      });
+    }
+  }
+
+  const pointsToAward = Math.max(0, score - previousBest);
+
+  const attempt = await db.bookQuizAttempt.create({
+    data: {
+      bookId,
+      lessonId,
+      userId: ctx.userId,
+      quizModel,
+      answers: toJson(normAnswers),
+      score,
+      maxScore,
+      pointsAwarded: pointsToAward,
+    },
+  });
+
+  if (pointsToAward > 0) {
+    await awardPoints(ctx.userId, pointsToAward, POINT_REASONS.BOOK_QUIZ, "BookLesson", lessonId);
+  }
+
+  await audit({
+    actorId: ctx.userId,
+    tenantId: ctx.tenantId,
+    action: "exam_submitted",
+    targetType: "book_lesson_quiz",
+    targetId: lessonId,
+    metadata: { model: quizModel, score, maxScore, points: pointsToAward, bookId },
+  });
+
+  return {
+    attemptId: attempt.id,
+    bookId,
+    lessonId,
+    bookTitle: book.title,
+    lessonTitle: lesson.title,
+    lessonOrder: lesson.order,
+    model: quizModel,
+    modelLabel: quizModelLabel(quizModel),
+    score,
+    maxScore,
+    percent: maxScore > 0 ? Math.round((score / maxScore) * 100) : 0,
+    previousBest,
+    newBest: score > previousBest,
+    pointsAwarded: pointsToAward,
+    perQuestion,
+  };
+}
+
+/** فایل پادکست یک درس — تلگرام اول، fallback محلی */
+export async function bookLessonPodcast(ctx: AuthContext, bookId: string, lessonId: string) {
+  const { book, lesson } = await visibleLesson(ctx, bookId, lessonId);
+  if (lesson.podcastStatus !== "READY") {
+    throw Errors.validation("پادکست این درس هنوز تولید نشده است.");
+  }
+  const safeTitle = `${book.title}-${lesson.order}`.replace(/[\\/:*?"<>|]/g, "_").slice(0, 60);
+  const tgAsset = await getTelegramAsset(bookId, `PODCAST_AUDIO_L:${lessonId}` as TelegramAssetKind);
+  if (tgAsset) {
+    const proxied = await proxyTelegramAsset(
+      { fileId: tgAsset.fileId, fileName: tgAsset.fileName, sizeBytes: tgAsset.sizeBytes },
+      { fallbackName: `podcast-${safeTitle}.wav`, contentType: "audio/wav" }
+    ).catch(() => null);
+    if (proxied && proxied.ok) {
+      return {
+        audio: proxied.data,
+        durationSec: lesson.podcastDurationSec ?? null,
+        filename: proxied.filename,
+        contentType: "audio/wav" as const,
+      };
+    }
+    if (lesson.podcastPath) {
+      const localStat = await fs.stat(lesson.podcastPath).catch(() => null);
+      if (localStat) {
+        return {
+          audio: await fs.readFile(lesson.podcastPath),
+          durationSec: lesson.podcastDurationSec ?? null,
+          filename: `podcast-${safeTitle}.wav`,
+          contentType: "audio/wav" as const,
+        };
+      }
+    }
+    if (proxied && !proxied.ok && proxied.tooBig) {
+      throw tooBigError(proxied.sizeBytes, await telegramDeepLink(bookId, `PODCAST_AUDIO_L:${lessonId}` as TelegramAssetKind));
+    }
+  }
+  if (!lesson.podcastPath) throw Errors.notFound("فایل پادکست درس");
+  const stat = await fs.stat(lesson.podcastPath).catch(() => null);
+  if (!stat) throw Errors.notFound("فایل پادکست درس");
+  return {
+    audio: await fs.readFile(lesson.podcastPath),
+    durationSec: lesson.podcastDurationSec ?? null,
+    filename: `podcast-${safeTitle}.wav`,
+    contentType: "audio/wav" as const,
   };
 }
 
@@ -1001,6 +1647,14 @@ export async function deleteBook(ctx: AuthContext, bookId: string) {
   }
   if (book.originalPdfPath) {
     await fs.rm(book.originalPdfPath, { force: true }).catch(() => undefined);
+  }
+  // Round 28 — فایل‌های پادکست محلی درس‌ها هم تمیز شوند (ردیف‌ها cascade می‌شوند)
+  const lessonPodcasts = await db.bookLesson.findMany({
+    where: { bookId, podcastPath: { not: null } },
+    select: { podcastPath: true },
+  });
+  for (const lp of lessonPodcasts) {
+    if (lp.podcastPath) await fs.rm(lp.podcastPath, { force: true }).catch(() => undefined);
   }
   // Round 23 — پیام‌های ذخیره‌سازی تلگرام هم تمیز شوند (ردیف‌ها با cascade پاک می‌شوند)
   await purgeTelegramAssets(bookId);

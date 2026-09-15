@@ -2,7 +2,7 @@ import ZAI from "z-ai-web-dev-sdk";
 import { db } from "@/lib/db";
 import { Errors } from "@/server/core/errors";
 import { FEATURES, type Feature } from "@/server/core/constants";
-import { resolveAiProvider } from "@/server/services/settings";
+import { getSettings, resolveAiProvider } from "@/server/services/settings";
 import { geminiFetch, type GeminiTransport } from "@/server/services/gemini-net";
 
 // Spec §10 — CENTRAL AI GATEWAY. No feature may call a provider directly.
@@ -241,6 +241,9 @@ export interface SpeakRequest {
   userId: string;
   voice?: TTSVoice;
   speed?: number; // 0.5 – 2.0
+  /** Round 28 — کد دورهٔ تحصیلی محتوا (PRE_PRIMARY | PRIMARY | …) — انتخاب
+   *  صدای گویندهٔ جمینای و لحن متناسب با سن از تنظیمات ادمین. */
+  levelHint?: string | null;
 }
 
 export interface SpeakResponse {
@@ -380,6 +383,235 @@ async function ttsChunk(
   return buffer;
 }
 
+// ── Round 28 — گویندهٔ Gemini TTS (خواستهٔ مدیر) ──
+// مدل‌های TTS رسمی گوگل ۲.۵: خروجی PCM 16-bit mono 24kHz در inlineData است؛
+// ما آن را به WAV استاندارد (هدر RIFF) تبدیل و چانک‌ها را با مکث می‌چسبانیم.
+// صدا و «لحن» (دستور طبیعی زبان در ابتدای متن) از تنظیمات ادمین می‌آید —
+// با override برای هر دورهٔ تحصیلی (صدای شادتر برای ابتدایی و…).
+const GEMINI_TTS_TIMEOUT_MS = 90_000;
+const GEMINI_TTS_CHUNK_CHARS = 2500; // خروجی هر چانک ~۲.۵ دقیقه صوت
+const GEMINI_TTS_MAX_CHUNKS = 3; // سقف کل ~۳۰ ثانیه×… مطابق سقف ۳۰۰۰ نویسهٔ موجود
+const GEMINI_TTS_SAMPLE_RATE = 24_000;
+
+/** PCM خام → WAV معتبر (RIFF/PCM 16-bit mono) */
+function pcmToWav(pcm: Buffer, sampleRate = GEMINI_TTS_SAMPLE_RATE, channels = 1, bitsPerSample = 16): Buffer {
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0, "ascii");
+  header.writeUInt32LE(36 + pcm.length, 4);
+  header.write("WAVE", 8, "ascii");
+  header.write("fmt ", 12, "ascii");
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20); // PCM
+  header.writeUInt16LE(channels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(sampleRate * channels * (bitsPerSample / 8), 28);
+  header.writeUInt16LE(channels * (bitsPerSample / 8), 32);
+  header.writeUInt16LE(bitsPerSample, 34);
+  header.write("data", 36, "ascii");
+  header.writeUInt32LE(pcm.length, 40);
+  return Buffer.concat([header, pcm]);
+}
+
+function splitForGeminiTts(text: string): string[] {
+  const sentences = text
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(/(?<=[.!?؟؛…:])|(?<=\n)/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const chunks: string[] = [];
+  let buf = "";
+  for (const s of sentences) {
+    if (s.length > GEMINI_TTS_CHUNK_CHARS) {
+      let rest = s;
+      while (rest.length > GEMINI_TTS_CHUNK_CHARS) {
+        let cut = rest.lastIndexOf(" ", GEMINI_TTS_CHUNK_CHARS);
+        if (cut < GEMINI_TTS_CHUNK_CHARS * 0.5) cut = GEMINI_TTS_CHUNK_CHARS;
+        if (buf) { chunks.push(buf); buf = ""; }
+        chunks.push(rest.slice(0, cut).trim());
+        rest = rest.slice(cut).trim();
+      }
+      if (rest) {
+        if (buf && buf.length + 1 + rest.length <= GEMINI_TTS_CHUNK_CHARS) buf = `${buf} ${rest}`;
+        else { if (buf) chunks.push(buf); buf = rest; }
+      }
+    } else if (buf && buf.length + 1 + s.length <= GEMINI_TTS_CHUNK_CHARS) {
+      buf = `${buf} ${s}`;
+    } else {
+      if (buf) chunks.push(buf);
+      buf = s;
+    }
+  }
+  if (buf) chunks.push(buf);
+  return chunks.filter(Boolean).slice(0, GEMINI_TTS_MAX_CHUNKS);
+}
+
+interface GeminiTtsConfig {
+  model: string;
+  voice: string;
+  stylePrompt: string;
+  apiKey: string;
+  proxyUrl: string;
+}
+
+async function resolveGeminiTts(levelHint?: string | null): Promise<GeminiTtsConfig | null> {
+  const provider = await resolveAiProvider().catch(() => null);
+  if (!provider || provider.provider !== "gemini") return null; // فقط وقتی ارائه‌دهندهٔ فعال جمیناست
+  const s = await getSettings();
+  if (!s.geminiTtsEnabled) return null; // ادمین خاموشش کرده → zai
+  const voice = (levelHint && s.geminiTtsVoiceByLevel[levelHint]) || s.geminiTtsVoice;
+  const style = (levelHint && s.geminiTtsStylePromptByLevel[levelHint]) || s.geminiTtsStylePrompt;
+  return {
+    model: s.geminiTtsModel,
+    voice,
+    stylePrompt: style,
+    apiKey: provider.apiKey,
+    proxyUrl: provider.proxyUrl,
+  };
+}
+
+async function geminiTtsChunk(
+  cfg: GeminiTtsConfig,
+  text: string,
+  signal: AbortSignal
+): Promise<Buffer> {
+  // لحن/سبک به‌صورت دستور طبیعی در ابتدای متن (الگوی رسمی گوگل TTS)
+  const spoken = cfg.stylePrompt.trim() ? `${cfg.stylePrompt.trim()}\n\n${text}` : text;
+  const body = {
+    contents: [{ parts: [{ text: spoken }] }],
+    generationConfig: {
+      responseModalities: ["AUDIO"],
+      speechConfig: {
+        voiceConfig: {
+          prebuiltVoiceConfig: { voiceName: cfg.voice },
+        },
+      },
+    },
+  };
+  const res = await geminiFetch(
+    `/v1beta/models/${encodeURIComponent(cfg.model)}:generateContent`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-goog-api-key": cfg.apiKey },
+      body: JSON.stringify(body),
+      signal,
+    },
+    { proxyUrl: cfg.proxyUrl }
+  );
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    throw new Error(`GEMINI_TTS_HTTP_${res.status}:${errText.slice(0, 200)}`);
+  }
+  const json = (await res.json()) as {
+    candidates?: Array<{
+      content?: { parts?: Array<{ inlineData?: { mimeType?: string; data?: string } }> };
+    }>;
+  };
+  const b64 = json.candidates?.[0]?.content?.parts?.find((p) => p.inlineData?.data)?.inlineData?.data;
+  if (!b64) throw new Error("GEMINI_TTS_EMPTY_RESPONSE");
+  const pcm = Buffer.from(b64, "base64");
+  if (pcm.length < 100) throw new Error("GEMINI_TTS_EMPTY_RESPONSE");
+  // نرخ نمونه‌برداری از MIME رسمی (audio/L16;codec=pcm;rate=24000) parse می‌شود
+  const mime = json.candidates?.[0]?.content?.parts?.find((p) => p.inlineData?.mimeType)?.inlineData?.mimeType ?? "";
+  const rateMatch = /rate=(\d{4,6})/.exec(mime);
+  const rate = rateMatch ? Number(rateMatch[1]) : GEMINI_TTS_SAMPLE_RATE;
+  return pcmToWav(pcm, rate);
+}
+
+/** تولید گفتار با Gemini TTS؛ اگر شکست خورد به zai برمی‌گردیم تا پادکست هرگز نمرود */
+async function aiSpeakWithGemini(
+  cfg: GeminiTtsConfig,
+  text: string,
+  req: SpeakRequest
+): Promise<SpeakResponse | null> {
+  const chunks = splitForGeminiTts(text);
+  if (chunks.length === 0) return null;
+  const started = Date.now();
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const wavChunks: Buffer[] = [];
+    let ok = true;
+    for (const chunk of chunks) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), GEMINI_TTS_TIMEOUT_MS);
+      try {
+        wavChunks.push(await geminiTtsChunk(cfg, chunk, controller.signal));
+      } catch (e) {
+        lastError = e;
+        ok = false;
+        break;
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    if (ok) {
+      const ref = parseWav(wavChunks[0]);
+      const pauseFrames = Math.round((ref.sampleRate * TTS_PAUSE_MS) / 1000);
+      const audio = mergeWavs(wavChunks, pauseFrames, ref);
+      const durationSec =
+        Math.round(((audio.length - 44) / (ref.sampleRate * ref.channels * (ref.bitsPerSample / 8))) * 10) / 10;
+      const inputUnits = text.length;
+      const outputUnits = Math.ceil(audio.length / 1000);
+      const estimatedCost = Math.ceil(((inputUnits + outputUnits) / 1000) * COST_PER_1K_CHARS);
+      await db.usageEvent
+        .create({
+          data: {
+            userId: req.userId,
+            tenantId: req.tenantId,
+            feature: req.feature,
+            provider: "gemini",
+            model: cfg.model,
+            inputUnits,
+            outputUnits,
+            estimatedCost,
+            success: true,
+          },
+        })
+        .catch(() => undefined);
+      return {
+        audio,
+        contentType: "audio/wav",
+        chunks: chunks.length,
+        chars: text.length,
+        durationSec,
+        usage: {
+          inputUnits,
+          outputUnits,
+          estimatedCost,
+          provider: "gemini",
+          model: cfg.model,
+          attempts: attempt,
+          latencyMs: Date.now() - started,
+        },
+      };
+    }
+    if (lastError instanceof Error && /GEMINI_TTS_HTTP_4\d\d/.test(lastError.message)) break; // 4xx با retry درست نمی‌شود
+    await new Promise((r) => setTimeout(r, 600 * attempt));
+  }
+  console.error(
+    `[ai-gateway] feature=${req.feature} gemini-tts failed (falling back to zai): ${
+      lastError instanceof Error ? lastError.message : "unknown"
+    }`
+  );
+  // ثبت شکست برای داشبورد مصرف
+  await db.usageEvent
+    .create({
+      data: {
+        userId: req.userId,
+        tenantId: req.tenantId,
+        feature: req.feature,
+        provider: "gemini",
+        model: cfg.model,
+        inputUnits: text.length,
+        outputUnits: 0,
+        estimatedCost: 0,
+        success: false,
+      },
+    })
+    .catch(() => undefined);
+  return null; // → فراخواننده به zai برمی‌گردد
+}
+
 export async function aiSpeak(req: SpeakRequest): Promise<SpeakResponse> {
   const started = Date.now();
   const text = req.text.replace(/\s+/g, " ").trim();
@@ -391,6 +623,15 @@ export async function aiSpeak(req: SpeakRequest): Promise<SpeakResponse> {
   const speed = typeof req.speed === "number" && req.speed >= 0.5 && req.speed <= 2 ? req.speed : 1;
   const chunks = splitForSpeech(text);
   if (chunks.length === 0) throw Errors.validation("متن قابل گفتار نیست.");
+
+  // ── Round 28 — اول تلاش با گویندهٔ Gemini TTS (تنظیم ادمین) ──
+  const geminiTts = await resolveGeminiTts(req.levelHint).catch(() => null);
+  if (geminiTts) {
+    const spoken = await aiSpeakWithGemini(geminiTts, text, req).catch(() => null);
+    if (spoken) return spoken;
+    // شکست → ادامه با zai تا پادکست تولید نشود؟ نه — پادکست با صدای جایگزین بهتر از
+    // نبودِ پادکست است (خبر در لاگ ثبت شد).
+  }
 
   const zai = await ZAI.create();
   let lastError: unknown = null;

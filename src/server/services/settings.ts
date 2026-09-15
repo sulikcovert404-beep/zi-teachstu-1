@@ -3,6 +3,7 @@ import { fromJson, toJson } from "@/server/core/json";
 import { Errors } from "@/server/core/errors";
 import { audit } from "./audit";
 import { readSettingsBackup, writeSettingsBackup, pickBackupValues } from "./settings-backup";
+import { isLevelCode } from "@/lib/education-levels";
 import type { AuthContext } from "@/server/auth/session";
 
 // Round 16 — Platform settings store (key/value JSON in PlatformSetting table).
@@ -24,6 +25,53 @@ export const GEMINI_MODELS = [
 
 export type GeminiModel = (typeof GEMINI_MODELS)[number]["code"];
 
+// ── Round 28 — گویندهٔ پادکست با Gemini TTS (خواستهٔ مدیر) ──
+// «برای صوت شخص در پادکست Gemini 2.5 TTS … برای ادمین قابل تنظیم باشه برای کی
+// بزاره و یه پیش‌فرض برای لحن هم قابل تنظیم باشه».
+export const GEMINI_TTS_MODELS = [
+  { code: "gemini-2.5-flash-preview-tts", label: "جمینای ۲.۵ فلش TTS (پیش‌فرض — سریع و اقتصادی)" },
+  { code: "gemini-2.5-pro-preview-tts", label: "جمینای ۲.۵ پرو TTS (کیفیت بالاتر — کندتر)" },
+] as const;
+
+// صداهای رسمی prebuilt گوگل (۳۰ صدا) با برچسب فارسی برای انتخاب ادمین.
+// ترتیب: اول پیشنهادهای ما برای فارسی آموزشی.
+export const GEMINI_TTS_VOICES: Array<{ code: string; label: string }> = [
+  { code: "Kore", label: "کوره — قاطع و روشن (پیشنهادی برای متوسطه)" },
+  { code: "Puck", label: "پاک — شاد و پرانرژی (پیشنهادی برای ابتدایی)" },
+  { code: "Zephyr", label: "زفیر — روشن و دوستانه" },
+  { code: "Leda", label: "لدا — جوان و سرزنده (پیشنهادی برای ابتدایی)" },
+  { code: "Sulafat", label: "سلافات — گرم و صمیمی" },
+  { code: "Achird", label: "اکرد — صمیمی و نزدیک" },
+  { code: "Charon", label: "خارون — آگاهانه و رسمی" },
+  { code: "Fenrir", label: "فنریر — پرشور و هیجان‌انگیز" },
+  { code: "Orus", label: "اوروس — محکم و قاطع" },
+  { code: "Aoede", label: "آئوده — ملایم و روان" },
+  { code: "Callirrhoe", label: "کالیروئه — خونسرد و ساده" },
+  { code: "Autonoe", label: "اتونوئه — روشن و امیدوار" },
+  { code: "Enceladus", label: "انسلادوس — آرام و نفس‌دار" },
+  { code: "Iapetus", label: "یاپتوس — شفاف و واضح" },
+  { code: "Umbriel", label: "امبریل — بی‌تشویش و ساده" },
+  { code: "Algieba", label: "الجبهه — نرم و لطیف" },
+  { code: "Despina", label: "دسپینا — نرم و روان" },
+  { code: "Erinome", label: "ارینومه — شفاف" },
+  { code: "Algenib", label: "الجنوب — خشن و بم" },
+  { code: "Rasalgethi", label: "رأس‌الغول — آگاهانه" },
+  { code: "Laomedeia", label: "لائومدیا — بالا و شاد" },
+  { code: "Achernar", label: "اخرنار — نرم و آرام" },
+  { code: "Alnilam", label: "النیلام — قاطع" },
+  { code: "Schedar", label: "شدر — یکنواخت و آرام" },
+  { code: "Gacrux", label: "گاکروکس — پخته و آرام" },
+  { code: "Pulcherrima", label: "پولکرریما — رو به جلو" },
+  { code: "Vindemiatrix", label: "ویندمیاتریکس — ملایم" },
+  { code: "Sadachbia", label: "سعدالاخبیه — زنده و شاد" },
+  { code: "Sadaltager", label: "سعدالتاجر — دانش‌محور" },
+  { code: "Zubenelgenubi", label: "زوبن‌الجنوبی — خودمانی" },
+];
+
+// لحن پیش‌فرض پیشنهادی ما (ادمین می‌تواند عوض کند) — دستور طبیعی به موتور TTS.
+export const DEFAULT_TTS_STYLE_PROMPT =
+  "با لحن گرم، شاد و خودمانیِ یک معلم دل‌سوز به زبان فارسی بخوان؛ طبیعی و روان با مکث‌های متناسب، بدون خواندن خشک و رباتیک.";
+
 export interface PlatformSettings {
   aiProvider: "zai" | "gemini";
   geminiApiKey: string;
@@ -31,6 +79,15 @@ export interface PlatformSettings {
   // Round 27 — پروکسی HTTP خروجی جمینای (مثلاً http://user:pass@host:port روی سرور
   // مدیر در کشورهای مجاز گوگل) — "" = اتصال مستقیم. قابل تغییر در هر میزبانی، بدون کد.
   geminiProxyUrl: string;
+  // ── Round 28 — گویندهٔ پادکست با Gemini TTS (قابل تنظیم ادمین) ──
+  // خواستهٔ مدیر: «برای صوت شخص در پادکست Gemini 2.5 TTS … برای ادمین قابل تنظیم
+  // باشه برای کی بزاره و یه پیش‌فرض برای لحن هم قابل تنظیم باشه».
+  geminiTtsEnabled: boolean; // روشن بودن گویندهٔ جمینای (وقتی ارائه‌دهنده gemini است)
+  geminiTtsModel: string; // مثلاً gemini-2.5-flash-preview-tts
+  geminiTtsVoice: string; // صدای پیش‌فرض (مثل Kore) — نام‌های رسمی prebuilt
+  geminiTtsStylePrompt: string; // لحن پیش‌فرض (دستور طبیعی به TTS)
+  geminiTtsVoiceByLevel: Record<string, string>; // override صدا برای هر دورهٔ تحصیلی
+  geminiTtsStylePromptByLevel: Record<string, string>; // override لحن برای هر دورهٔ تحصیلی
   telegramBotToken: string;
   telegramMiniAppUrl: string;
   telegramBotUsername: string; // cached from getMe
@@ -46,6 +103,12 @@ export const DEFAULT_SETTINGS: PlatformSettings = {
   geminiApiKey: "",
   geminiModel: "gemini-flash-latest", // مستعار رسمی گوگل — همیشه به جدیدترین فلش اشاره می‌کند
   geminiProxyUrl: "",
+  geminiTtsEnabled: true,
+  geminiTtsModel: "gemini-2.5-flash-preview-tts",
+  geminiTtsVoice: "Kore",
+  geminiTtsStylePrompt: DEFAULT_TTS_STYLE_PROMPT,
+  geminiTtsVoiceByLevel: {},
+  geminiTtsStylePromptByLevel: {},
   telegramBotToken: "",
   telegramMiniAppUrl: "",
   telegramBotUsername: "",
@@ -60,6 +123,12 @@ const KEYS = {
   geminiApiKey: "ai.gemini.apiKey",
   geminiModel: "ai.gemini.model",
   geminiProxyUrl: "ai.gemini.proxyUrl",
+  geminiTtsEnabled: "ai.gemini.ttsEnabled",
+  geminiTtsModel: "ai.gemini.ttsModel",
+  geminiTtsVoice: "ai.gemini.ttsVoice",
+  geminiTtsStylePrompt: "ai.gemini.ttsStylePrompt",
+  geminiTtsVoiceByLevel: "ai.gemini.ttsVoiceByLevel",
+  geminiTtsStylePromptByLevel: "ai.gemini.ttsStylePromptByLevel",
   telegramBotToken: "telegram.botToken",
   telegramMiniAppUrl: "telegram.miniAppUrl",
   telegramBotUsername: "telegram.botUsername",
@@ -90,6 +159,21 @@ export async function getSettings(): Promise<PlatformSettings> {
   let telegramMiniAppUrl = g<string>(KEYS.telegramMiniAppUrl, "");
   let telegramBotUsername = g<string>(KEYS.telegramBotUsername, "");
   const geminiProxyUrl = g<string>(KEYS.geminiProxyUrl, "");
+
+  // ── Round 28 — گویندهٔ Gemini TTS ──
+  const voiceOk = (v: unknown): v is string => typeof v === "string" && /^[A-Za-z][A-Za-z0-9_-]{1,31}$/.test(v);
+  const cleanLevelMap = (raw: unknown, valueTest: (v: unknown) => boolean): Record<string, string> => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+      if (isLevelCode(k) && valueTest(v)) out[k] = String(v).slice(0, 2000);
+    }
+    return out;
+  };
+  const ttsModelRaw = g<string>(KEYS.geminiTtsModel, DEFAULT_SETTINGS.geminiTtsModel);
+  const ttsVoiceRaw = g<string>(KEYS.geminiTtsVoice, DEFAULT_SETTINGS.geminiTtsVoice);
+  const geminiTtsModel = isModelCode(ttsModelRaw) ? ttsModelRaw : DEFAULT_SETTINGS.geminiTtsModel;
+  const geminiTtsVoice = voiceOk(ttsVoiceRaw) ? ttsVoiceRaw : DEFAULT_SETTINGS.geminiTtsVoice;
 
   // ── Round 24/26 — Self-heal from the file mirror ──
   // اگر «ردیفِ» تنظیمات کلیدی از جدول حذف شده باشد (مثلاً پاک‌شدن کامل
@@ -135,6 +219,15 @@ export async function getSettings(): Promise<PlatformSettings> {
     geminiApiKey,
     geminiModel: isModelCode(model) ? model : DEFAULT_SETTINGS.geminiModel,
     geminiProxyUrl,
+    geminiTtsEnabled: g<boolean>(KEYS.geminiTtsEnabled, DEFAULT_SETTINGS.geminiTtsEnabled),
+    geminiTtsModel,
+    geminiTtsVoice,
+    geminiTtsStylePrompt: g<string>(KEYS.geminiTtsStylePrompt, DEFAULT_SETTINGS.geminiTtsStylePrompt).slice(0, 2000),
+    geminiTtsVoiceByLevel: cleanLevelMap(fromJson<Record<string, string>>(map.get(KEYS.geminiTtsVoiceByLevel) ?? null, {}), voiceOk),
+    geminiTtsStylePromptByLevel: cleanLevelMap(
+      fromJson<Record<string, string>>(map.get(KEYS.geminiTtsStylePromptByLevel) ?? null, {}),
+      (v) => typeof v === "string"
+    ),
     telegramBotToken,
     telegramMiniAppUrl,
     telegramBotUsername,
@@ -146,12 +239,25 @@ export async function getSettings(): Promise<PlatformSettings> {
 }
 
 export async function getSettingsForClient(): Promise<
-  Omit<PlatformSettings, "geminiApiKey" | "telegramBotToken"> & {
+  Omit<
+    PlatformSettings,
+    "geminiApiKey" | "telegramBotToken" | "geminiTtsEnabled" | "geminiTtsModel" | "geminiTtsVoice" | "geminiTtsStylePrompt" | "geminiTtsVoiceByLevel" | "geminiTtsStylePromptByLevel"
+  > & {
     hasGeminiKey: boolean;
     geminiApiKeyMasked: string;
     hasTelegramToken: boolean;
     telegramTokenMasked: string;
     geminiModels: Array<{ code: string; label: string }>;
+    geminiTts: {
+      enabled: boolean;
+      model: string;
+      voice: string;
+      stylePrompt: string;
+      voiceByLevel: Record<string, string>;
+      stylePromptByLevel: Record<string, string>;
+      models: Array<{ code: string; label: string }>;
+      voices: Array<{ code: string; label: string }>;
+    };
     telegramStorage: Awaited<ReturnType<typeof import("./telegram-storage").telegramStorageClientInfo>>;
   }
 > {
@@ -172,6 +278,16 @@ export async function getSettingsForClient(): Promise<
     hasTelegramToken: !!s.telegramBotToken,
     telegramTokenMasked: mask(s.telegramBotToken),
     geminiModels: GEMINI_MODELS.map((m) => ({ code: m.code, label: m.label })),
+    geminiTts: {
+      enabled: s.geminiTtsEnabled,
+      model: s.geminiTtsModel,
+      voice: s.geminiTtsVoice,
+      stylePrompt: s.geminiTtsStylePrompt,
+      voiceByLevel: s.geminiTtsVoiceByLevel,
+      stylePromptByLevel: s.geminiTtsStylePromptByLevel,
+      models: GEMINI_TTS_MODELS.map((m) => ({ code: m.code, label: m.label })),
+      voices: GEMINI_TTS_VOICES,
+    },
     telegramStorage: await import("./telegram-storage").then((m) =>
       m.telegramStorageClientInfo()
     ),
@@ -183,6 +299,12 @@ export interface SettingsUpdateInput {
   geminiApiKey?: unknown; // undefined = keep; "" = clear; string = replace
   geminiModel?: unknown;
   geminiProxyUrl?: unknown; // "" = مستقیم
+  geminiTtsEnabled?: unknown; // Round 28 — گویندهٔ جمینای
+  geminiTtsModel?: unknown;
+  geminiTtsVoice?: unknown;
+  geminiTtsStylePrompt?: unknown;
+  geminiTtsVoiceByLevel?: unknown; // Record<levelCode, voice>
+  geminiTtsStylePromptByLevel?: unknown; // Record<levelCode, style>
   telegramBotToken?: unknown; // same semantics
   telegramMiniAppUrl?: unknown;
   booksUploadTenants?: unknown;
@@ -257,6 +379,60 @@ export async function updateSettings(ctx: AuthContext, input: SettingsUpdateInpu
     }
     patch.geminiProxyUrl = toJson(proxyUrl);
   }
+
+  // ── Round 28 — گویندهٔ Gemini TTS (قابل تنظیم ادمین از داشبورد) ──
+  if (input.geminiTtsEnabled !== undefined) {
+    patch.geminiTtsEnabled = toJson(Boolean(input.geminiTtsEnabled));
+  }
+  const ttsModel = str(input.geminiTtsModel);
+  if (ttsModel !== undefined) {
+    if (ttsModel !== "" && !isModelCode(ttsModel)) {
+      throw Errors.validation("کد مدل TTS جمینای معتبر نیست (مثلاً gemini-2.5-flash-preview-tts).");
+    }
+    patch.geminiTtsModel = toJson(ttsModel || DEFAULT_SETTINGS.geminiTtsModel);
+  }
+  const ttsVoice = str(input.geminiTtsVoice);
+  if (ttsVoice !== undefined) {
+    if (ttsVoice !== "" && !/^[A-Za-z][A-Za-z0-9_-]{1,31}$/.test(ttsVoice)) {
+      throw Errors.validation("نام صدای گوینده باید یک نام رسمی گوگل باشد (مثلاً Kore یا Puck).");
+    }
+    patch.geminiTtsVoice = toJson(ttsVoice || DEFAULT_SETTINGS.geminiTtsVoice);
+  }
+  const ttsStyle = str(input.geminiTtsStylePrompt);
+  if (ttsStyle !== undefined) {
+    patch.geminiTtsStylePrompt = toJson(ttsStyle.slice(0, 2000));
+  }
+  const levelMapPatch = (raw: unknown, field: "geminiTtsVoiceByLevel" | "geminiTtsStylePromptByLevel", valueTest: (v: unknown) => boolean, errFa: string) => {
+    if (raw === undefined) return;
+    if (raw === null || raw === "") {
+      patch[field] = toJson({});
+      return;
+    }
+    if (typeof raw !== "object" || Array.isArray(raw)) {
+      throw Errors.validation(errFa);
+    }
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+      if (!isLevelCode(k)) {
+        throw Errors.validation(`دورهٔ تحصیلی نامعتبر: ${k} — کدهای مجاز: PRE_PRIMARY، PRIMARY، MIDDLE_1، MIDDLE_2، TECHNICAL.`);
+      }
+      if (!valueTest(v)) throw Errors.validation(errFa);
+      out[k] = String(v).slice(0, 2000);
+    }
+    patch[field] = toJson(out);
+  };
+  levelMapPatch(
+    input.geminiTtsVoiceByLevel,
+    "geminiTtsVoiceByLevel",
+    (v) => typeof v === "string" && /^[A-Za-z][A-Za-z0-9_-]{1,31}$/.test(v),
+    "صدای هر دورهٔ تحصیلی باید نام رسمی گوگل باشد (مثلاً Kore)."
+  );
+  levelMapPatch(
+    input.geminiTtsStylePromptByLevel,
+    "geminiTtsStylePromptByLevel",
+    (v) => typeof v === "string",
+    "لحن هر دورهٔ تحصیلی باید متن باشد."
+  );
 
   const botToken = str(input.telegramBotToken);
   if (botToken !== undefined) {

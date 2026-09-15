@@ -531,15 +531,61 @@ model Book {
   approvalStatus String @default("NOT_REQUIRED") // NOT_REQUIRED (platform) | PENDING | APPROVED | REJECTED
   approvalNote  String? // e.g. rejection reason shown to the uploader
   errorReason String?
+  // ── Round 28 — معماری درس‌محور ──
+  // آپلود جدید فقط «تشخیص درس‌ها» را اجرا می‌کند (سریع و ارزان)؛ تولید
+  // خلاصه/جزوه/سؤال/شکل/پادکست به‌صورت تنبل و «برای هر درس» با اولین انتخاب
+  // کاربر انجام می‌شود و برای کاربران بعدی فوراً از همان خروجی ذخیره‌شده پاسخ
+  // داده می‌شود. کتاب‌های قدیمی (بدون درس) روی مسیر قبلی کل‌کتاب می‌مانند.
+  lessonsStatus String @default("PENDING") // PENDING | GENERATING | READY | FAILED (تشخیص درس‌ها)
+  lessonsKind   String? // نوع واحد تشخیص‌داده‌شده: درس | فصل | پودمان | مهارت | واحد | کل کتاب
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
   attempts BookQuizAttempt[]
   telegramAssets TelegramAsset[]
+  lessons  BookLesson[]
 
   @@index([tenantId, status])
   @@index([approvalStatus, createdAt])
   @@index([addedById])
+}
+
+// ─────────────────────────────── Round 28 — BookLesson (معماری درس‌محور) ───────────────────────────────
+// خواستهٔ مدیر: «کتاب که آپلود شد فقط تشخیص بدهد چند درس/مهارت/پودمان دارد؛
+// اولین نفری که درسی را انتخاب کرد همهٔ محتواهای آن درس ساخته و ذخیره شود؛
+// نفر دوم همان درس را فوری از خروجی ذخیره‌شده بگیرد.»
+// قفل اتمیک: claim با updateMany(status=PENDING→GENERATING) تضمین می‌کند فقط
+// یک کاربر (اولین) تولید را شروع کند و بقیه نتیجهٔ او را poll کنند.
+model BookLesson {
+  id        String   @id @default(cuid())
+  bookId    String
+  book      Book     @relation(fields: [bookId], references: [id], onDelete: Cascade)
+  order     Int // شمارهٔ درس (۱-مبنا) به ترتیب ظاهرشدن در کتاب
+  title     String // عنوان درس همان‌طور که در کتاب آمده
+  kind      String   @default("درس") // درس | فصل | پودمان | مهارت | واحد | کل کتاب
+  status    String   @default("PENDING") // PENDING | GENERATING | READY | PARTIAL | FAILED
+  // ── مصنوعات درس (همان پنج کار کتاب، اما درس‌محور و سن‌سنجیده) ──
+  summary        String?
+  summaryStatus  String @default("PENDING")
+  studyNotes     String?
+  studyNotesStatus String @default("PENDING")
+  quiz           String? // JSON: {mc,tf,fb,short}
+  quizStatus     String @default("PENDING")
+  quizCount      Int    @default(0)
+  figures        String? // JSON: [{id,title,svg,caption}]
+  figuresStatus  String @default("PENDING")
+  figuresCount   Int    @default(0)
+  podcastPath    String? // fallback محلی (اگر تلگرام در دسترس نبود)
+  podcastStatus  String @default("PENDING")
+  podcastDurationSec Int?
+  podcastTelegram Boolean @default(false)
+  errorReason String?
+  generatedById  String? // اولین کاربری که این درس را انتخاب و تولید را شروع کرد
+  firstAccessAt  DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([bookId, order])
 }
 
 // ─────────────────────────────── Telegram-as-Storage (round 23) ───────────────────────────────
@@ -574,6 +620,8 @@ model BookQuizAttempt {
   id            String   @id @default(cuid())
   bookId        String
   book          Book     @relation(fields: [bookId], references: [id], onDelete: Cascade)
+  // Round 28 — آزمونِ «درس» (نوشتنی فقط از مسیر درس؛ کتاب‌محور قدیمی null می‌ماند)
+  lessonId      String?
   userId        String
   user          User     @relation("BookQuizAttempts", fields: [userId], references: [id])
   quizModel     String   // MC | TF | MIXED

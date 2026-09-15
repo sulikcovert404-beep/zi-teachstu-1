@@ -22,6 +22,7 @@ import { EmptyState, ErrorState, faDateTime, faNum } from "@/components/shared/b
 import { gradeLabelFa } from "@/lib/education-levels";
 import { cn } from "@/lib/utils";
 import { useToast, toast } from "@/hooks/use-toast";
+import { LessonView, type LessonMeta } from "@/components/student/lesson-view";
 import {
   ArrowRight, BookOpen, Check, Cloud, Download, Eye, FileDown, Headphones, Loader2, NotebookPen,
   Printer, RefreshCw, Shapes, Sparkles, Trophy, X,
@@ -88,6 +89,10 @@ export interface BookDetailData extends BookRow {
   myAttempts: BookAttempt[];
   errorReason: string | null;
   hasOriginalPdf: boolean;
+  // Round 28 — معماری درس‌محور: کتاب‌های جدید پس از آپلود فقط درس‌ها را دارند
+  lessonsStatus?: "PENDING" | "GENERATING" | "READY" | "FAILED";
+  lessonsKind?: string | null;
+  lessons?: LessonMeta[];
   // Round 23 — نقشهٔ kind → fileId دائمی تلگرام (مثلاً ORIGINAL_PDF، PODCAST_AUDIO، SUMMARY_PDF…)
   telegramFiles?: Record<string, string>;
 }
@@ -329,7 +334,7 @@ export function BookDetailView({
     };
   }, [book.id, reloadKey]);
 
-  const busyGenerating = !!detail && isBookBusy(detail);
+  const busyGenerating = !!detail && (detail.lessons && detail.lessons.length > 0 ? isBusy(detail.status) : isBookBusy(detail));
 
   useEffect(() => {
     if (!busyGenerating) return;
@@ -641,7 +646,15 @@ export function BookDetailView({
             {detail && (
               <>
                 {/* ── generation status banner ── */}
-                {isBusy(detail.status) && (
+                {detail.lessonsStatus === "GENERATING" && (
+                  <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-3.5 flex items-center gap-2.5 text-xs text-amber-700 dark:text-amber-400">
+                    <Loader2 className="h-4 w-4 animate-spin shrink-0" aria-hidden />
+                    <span className="leading-6">
+                      در حال شناسایی درس‌ها/فصل‌های کتاب با هوش مصنوعی… — بلافاصله بعد از آن می‌توانید {detail.lessonsKind ?? "درس"} موردنظر را انتخاب کنید.
+                    </span>
+                  </div>
+                )}
+                {isBusy(detail.status) && detail.lessonsStatus !== "GENERATING" && (
                   <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-3.5 flex items-center gap-2.5 text-xs text-amber-700 dark:text-amber-400">
                     <Loader2 className="h-4 w-4 animate-spin shrink-0" aria-hidden />
                     <span className="leading-6">
@@ -649,7 +662,7 @@ export function BookDetailView({
                     </span>
                   </div>
                 )}
-                {detail.status === "FAILED" && (
+                {detail.status === "FAILED" && detail.lessonsStatus !== "FAILED" && (
                   <div className="rounded-xl border border-rose-500/40 bg-rose-500/10 p-3.5 flex items-start gap-2.5 text-xs text-rose-700 dark:text-rose-400">
                     <X className="h-4 w-4 shrink-0 mt-1" aria-hidden />
                     <span className="leading-6">
@@ -657,15 +670,30 @@ export function BookDetailView({
                     </span>
                   </div>
                 )}
-                {detail.status === "PARTIAL" && (
-                  <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-3.5 flex items-start gap-2.5 text-xs text-amber-700 dark:text-amber-400">
-                    <Sparkles className="h-4 w-4 shrink-0 mt-0.5" aria-hidden />
+                {detail.lessonsStatus === "FAILED" && (
+                  <div className="rounded-xl border border-rose-500/40 bg-rose-500/10 p-3.5 flex items-start gap-2.5 text-xs text-rose-700 dark:text-rose-400">
+                    <X className="h-4 w-4 shrink-0 mt-1" aria-hidden />
                     <span className="leading-6">
-                      بخشی از محتوای هوشمند این کتاب ساخته نشد — وضعیت هر بخش را در پایین ببینید.
+                      شناسایی درس‌های این کتاب ناموفق بود{detail.errorReason ? ` — ${detail.errorReason}` : ""}. دوباره باز کنید یا با مدیر در میان بگذارید.
                     </span>
                   </div>
                 )}
 
+                {/* ── Round 28 — نمای درس‌محور: کتاب‌های جدید (دارای درس) ── */}
+                {detail.lessons && detail.lessons.length > 0 && (
+                  <LessonView
+                    bookId={book.id}
+                    lessons={detail.lessons}
+                    bookTitle={book.title}
+                    lessonsKind={detail.lessonsKind ?? null}
+                    onChanged={onChanged}
+                    onPointsGained={onPointsGained}
+                  />
+                )}
+
+                {/* ── مسیر legacy: کتاب‌های بدون درس (محتوای کل‌کتاب از قبل) ── */}
+                {!(detail.lessons && detail.lessons.length > 0) && (
+                  <>
                 {/* ── summary ── */}
                 {detail.summaryStatus === "READY" && detail.summary && (
                   <Card className="border-border/60">
@@ -1213,11 +1241,15 @@ export function BookDetailView({
                     </CardContent>
                   </Card>
                 )}
+                  </>
+                )}
 
                 {/* ── meta footer ── */}
                 <p className="text-[10px] text-muted-foreground leading-5 flex items-center gap-1.5 flex-wrap">
                   <BookOpen className="h-3 w-3 shrink-0" aria-hidden />
-                  اضافه‌شده در {faDateTime(detail.createdAt)} · {faNum(detail.quizCount)} نمونه‌سؤال تولیدشده
+                  {detail.lessons && detail.lessons.length > 0
+                    ? `اضافه‌شده در ${faDateTime(detail.createdAt)} · ${faNum(detail.lessons.length)} ${detail.lessonsKind ?? "درس"} · محتوای هر درس با اولین انتخاب ساخته می‌شود`
+                    : `اضافه‌شده در ${faDateTime(detail.createdAt)} · ${faNum(detail.quizCount)} نمونه‌سؤال تولیدشده`}
                 </p>
               </>
             )}

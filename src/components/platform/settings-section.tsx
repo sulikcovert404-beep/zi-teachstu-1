@@ -39,10 +39,12 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
 import { EmptyState, ErrorState, PageTitle, faNum } from "@/components/shared/blocks";
 import {
   AlertCircle,
   AlertTriangle,
+  AudioLines,
   Bot,
   BookOpen,
   Building2,
@@ -57,6 +59,7 @@ import {
   GraduationCap,
   Info,
   KeyRound,
+  Layers,
   Link2,
   Loader2,
   RefreshCw,
@@ -66,9 +69,11 @@ import {
   ShieldCheck,
   Sparkles,
   Wand2,
+  X,
   Zap,
 } from "lucide-react";
 import { faDigits, faSizeBytes, tenantStatusFa, type TelegramStorageBlock, type TenantRow } from "./types";
+import { EDUCATION_LEVELS } from "@/lib/education-levels";
 
 // ── API contracts (src/server/services/settings.ts) ──
 
@@ -80,11 +85,24 @@ interface GeminiModelOption {
   deprecated?: boolean; // فقط در فهرست زندهٔ گوگل پر می‌شود
 }
 
+interface GeminiTtsBlock {
+  enabled: boolean;
+  model: string;
+  voice: string;
+  stylePrompt: string;
+  voiceByLevel: Record<string, string>;
+  stylePromptByLevel: Record<string, string>;
+  models: Array<{ code: string; label: string }>;
+  voices: Array<{ code: string; label: string }>;
+}
+
 interface PlatformSettingsView {
   aiProvider: AiProviderChoice;
   geminiModel: string;
   // Round 27 — پروکسی جمینای (با احراز هویت اختیاری)
   geminiProxyUrl: string;
+  // Round 28 — گویندهٔ پادکست (Gemini TTS) — قابل تنظیم ادمین
+  geminiTts?: GeminiTtsBlock;
   telegramMiniAppUrl: string;
   telegramBotUsername: string;
   // Round 23 — ذخیره‌سازی کامل در تلگرام (raw fields + rich status block)
@@ -390,6 +408,16 @@ export function SettingsSection() {
   // Round 23 — ذخیره‌سازی در تلگرام
   const [tgChatIdInput, setTgChatIdInput] = useState("");
 
+  // ── Round 28 — گویندهٔ Gemini TTS (صدا + لحن + override هر دورهٔ تحصیلی) ──
+  const [ttsEnabled, setTtsEnabled] = useState(true);
+  const [ttsModel, setTtsModel] = useState("gemini-2.5-flash-preview-tts");
+  const [ttsVoice, setTtsVoice] = useState("Kore");
+  const [ttsStyle, setTtsStyle] = useState("");
+  const [ttsVoiceByLevel, setTtsVoiceByLevel] = useState<Record<string, string>>({});
+  const [ttsStyleByLevel, setTtsStyleByLevel] = useState<Record<string, string>>({});
+  const [savingTts, setSavingTts] = useState(false);
+  const [ttsMsg, setTtsMsg] = useState<InlineMsg | null>(null);
+
   // وضعیت‌های مشغول و پیام درون‌کاری
   const [savingGemini, setSavingGemini] = useState(false);
   const [testingGemini, setTestingGemini] = useState(false);
@@ -404,29 +432,45 @@ export function SettingsSection() {
   const [booksMsg, setBooksMsg] = useState<InlineMsg | null>(null);
   const [storageMsg, setStorageMsg] = useState<InlineMsg | null>(null);
 
-  const syncAll = useCallback((res: PlatformSettingsView) => {
-    setSettings(res);
-    setAiProvider(res.aiProvider === "gemini" ? "gemini" : "zai");
-    setGeminiModel(res.geminiModel);
-    setGeminiKeyInput("");
-    setGeminiProxyUrl(res.geminiProxyUrl ?? "");
-    setMiniAppUrl(res.telegramMiniAppUrl);
-    setBotTokenInput("");
-    setTgChatIdInput(res.telegramStorageChatId ?? "");
-    setAdminUpload(new Set(res.booksUploadTenants));
-    setTeacherUpload(new Set(res.teacherBookUploadTenants));
+  // ── Round 28 — همگام‌سازی فرم گویندهٔ Gemini TTS از پاسخ سرور ──
+  const syncTtsFromServer = useCallback((res: PlatformSettingsView) => {
+    const t = res.geminiTts;
+    if (!t) return;
+    setTtsEnabled(t.enabled);
+    setTtsModel(t.model);
+    setTtsVoice(t.voice);
+    setTtsStyle(t.stylePrompt);
+    setTtsVoiceByLevel(t.voiceByLevel ?? {});
+    setTtsStyleByLevel(t.stylePromptByLevel ?? {});
   }, []);
 
-  // فقط حوزهٔ همان کارت را با پاسخ سرور همگام می‌کند تا ویرایش‌های ذخیره‌نشدهٔ
-  // کارت‌های دیگر از بین نرود.
+  const syncAll = useCallback(
+    (res: PlatformSettingsView) => {
+      setSettings(res);
+      setAiProvider(res.aiProvider === "gemini" ? "gemini" : "zai");
+      setGeminiModel(res.geminiModel);
+      setGeminiKeyInput("");
+      setGeminiProxyUrl(res.geminiProxyUrl ?? "");
+      setMiniAppUrl(res.telegramMiniAppUrl);
+      setBotTokenInput("");
+      setTgChatIdInput(res.telegramStorageChatId ?? "");
+      setAdminUpload(new Set(res.booksUploadTenants));
+      setTeacherUpload(new Set(res.teacherBookUploadTenants));
+      syncTtsFromServer(res);
+    },
+    [syncTtsFromServer]
+  );
+
   const applyScoped = useCallback(
-    (res: PlatformSettingsView, scope: "gemini" | "telegram" | "books" | "storage") => {
+    (res: PlatformSettingsView, scope: "gemini" | "telegram" | "books" | "storage" | "tts") => {
       setSettings(res);
       if (scope === "gemini") {
         setAiProvider(res.aiProvider === "gemini" ? "gemini" : "zai");
         setGeminiModel(res.geminiModel);
         setGeminiKeyInput("");
         setGeminiProxyUrl(res.geminiProxyUrl ?? "");
+      } else if (scope === "tts") {
+        syncTtsFromServer(res);
       } else if (scope === "telegram") {
         setMiniAppUrl(res.telegramMiniAppUrl);
         setBotTokenInput("");
@@ -518,6 +562,19 @@ export function SettingsSection() {
     () => !!settings && tgChatIdInput.trim() !== (settings.telegramStorageChatId ?? ""),
     [settings, tgChatIdInput]
   );
+
+  const ttsDirty = useMemo(() => {
+    if (!settings?.geminiTts) return false;
+    const t = settings.geminiTts;
+    return (
+      ttsEnabled !== t.enabled ||
+      ttsModel !== t.model ||
+      ttsVoice !== t.voice ||
+      ttsStyle.trim() !== t.stylePrompt ||
+      JSON.stringify(ttsVoiceByLevel) !== JSON.stringify(t.voiceByLevel ?? {}) ||
+      JSON.stringify(ttsStyleByLevel) !== JSON.stringify(t.stylePromptByLevel ?? {})
+    );
+  }, [settings, ttsEnabled, ttsModel, ttsVoice, ttsStyle, ttsVoiceByLevel, ttsStyleByLevel]);
 
   const toggleInSet = useCallback(
     (setter: Dispatch<SetStateAction<Set<string>>>, id: string, on: boolean) => {
@@ -643,6 +700,48 @@ export function SettingsSection() {
       toast({ title: "آزمودن اتصال ناموفق بود", description: errMsg(e), variant: "destructive" });
     } finally {
       setTestingGemini(false);
+    }
+  }
+
+  // ── Round 28 — ذخیرهٔ گویندهٔ Gemini TTS ──
+  async function saveTts() {
+    setSavingTts(true);
+    setTtsMsg(null);
+    try {
+      const res = await api<PlatformSettingsView>("/api/v1/platform/settings", {
+        method: "PUT",
+        body: JSON.stringify({
+          geminiTtsEnabled: ttsEnabled,
+          geminiTtsModel: ttsModel,
+          geminiTtsVoice: ttsVoice,
+          geminiTtsStylePrompt: ttsStyle.trim(),
+          geminiTtsVoiceByLevel: ttsVoiceByLevel,
+          geminiTtsStylePromptByLevel: ttsStyleByLevel,
+        }),
+      });
+      applyScoped(res, "tts");
+      setTtsMsg({
+        kind: "success",
+        title: "تنظیمات گویندهٔ پادکست ذخیره شد",
+        body: (
+          <p>
+            {res.geminiTts?.enabled ? (
+              <>
+                گوینده: <span className="font-bold">{res.geminiTts.voices.find((v) => v.code === res.geminiTts?.voice)?.label ?? res.geminiTts.voice}</span>{" "}
+                · مدل: <span dir="ltr" className="font-mono text-xs bg-muted/60 rounded px-1.5 py-0.5">{res.geminiTts.model}</span>
+              </>
+            ) : (
+              "گویندهٔ جمینای خاموش است — پادکست‌ها با موتور پیش‌فرض ساخته می‌شوند."
+            )}
+          </p>
+        ),
+      });
+      toast({ title: "تنظیمات گوینده ذخیره شد" });
+    } catch (e) {
+      setTtsMsg({ kind: "error", title: "ذخیرهٔ تنظیمات گوینده ناموفق بود", body: <p>{errMsg(e)}</p> });
+      toast({ title: "ذخیرهٔ تنظیمات گوینده ناموفق بود", description: errMsg(e), variant: "destructive" });
+    } finally {
+      setSavingTts(false);
     }
   }
 
@@ -1294,6 +1393,202 @@ export function SettingsSection() {
               </p>
             </CardFooter>
           </Card>
+
+          {/* ═══ Round 28 — گویندهٔ پادکست (Gemini TTS) — قابل تنظیم ادمین ═══ */}
+          {settings?.geminiTts && (
+            <Card className="border-border/60">
+              <CardHeader className="pb-3">
+                <CardTitle className="text-base flex items-center gap-2">
+                  <AudioLines className="h-4.5 w-4.5 text-primary" aria-hidden />
+                  گویندهٔ پادکست (Gemini 2.5 TTS)
+                </CardTitle>
+                <CardDescription>
+                  صدای گوینده و لحن پیش‌فرض پادکست‌ها — با امکان تعیین صدای جداگانه برای هر دورهٔ تحصیلی.
+                </CardDescription>
+                <CardAction>
+                  <Badge
+                    variant="outline"
+                    className={
+                      settings.aiProvider === "gemini" && ttsEnabled
+                        ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                        : ""
+                    }
+                  >
+                    {settings.aiProvider !== "gemini"
+                      ? "نیاز به ارائه‌دهندهٔ جمینای"
+                      : ttsEnabled
+                        ? "فعال"
+                        : "خاموش"}
+                  </Badge>
+                </CardAction>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="flex items-center justify-between gap-3 rounded-xl border border-border/70 bg-muted/20 p-3.5">
+                  <div className="min-w-0">
+                    <p className="text-sm font-bold">استفاده از گویندهٔ جمینای برای پادکست‌ها</p>
+                    <p className="text-[11px] text-muted-foreground leading-4 mt-0.5">
+                      وقتی ارائه‌دهندهٔ فعال جمینای است، پادکست‌ها با صدای انتخابی شما ساخته می‌شوند؛ در صورت خطا، خودکار به موتور پیش‌فرض برمی‌گردد.
+                    </p>
+                  </div>
+                  <Switch checked={ttsEnabled} onCheckedChange={setTtsEnabled} aria-label="فعال‌سازی گویندهٔ جمینای" />
+                </div>
+
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="space-y-1.5">
+                    <Label>مدل TTS گوگل</Label>
+                    <Select value={ttsModel} onValueChange={setTtsModel}>
+                      <SelectTrigger className="h-10 text-sm" aria-label="مدل TTS">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {(settings.geminiTts.models ?? []).map((m) => (
+                          <SelectItem key={m.code} value={m.code}>
+                            <span className="text-xs">{m.label}</span>
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>صدای پیش‌فرض گوینده</Label>
+                    <Select value={ttsVoice} onValueChange={setTtsVoice}>
+                      <SelectTrigger className="h-10 text-sm" aria-label="صدای گوینده">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent className="max-h-72">
+                        {(settings.geminiTts.voices ?? []).map((v) => (
+                          <SelectItem key={v.code} value={v.code}>
+                            <span className="text-xs">{v.label}</span>
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label htmlFor="tts-style">لحن پیش‌فرض گوینده (قابل تنظیم)</Label>
+                  <Textarea
+                    id="tts-style"
+                    value={ttsStyle}
+                    onChange={(e) => setTtsStyle(e.target.value)}
+                    placeholder="مثلاً: با لحن گرم، شاد و خودمانیِ یک معلم دل‌سوز به فارسی بخوان؛ طبیعی و روان با مکث‌های متناسب، بدون خواندن خشک و رباتیک."
+                    className="text-sm leading-7 min-h-[70px]"
+                    aria-describedby="tts-style-hint"
+                  />
+                  <p id="tts-style-hint" className="text-[11px] text-muted-foreground leading-4">
+                    این دستور به‌عنوان راهنمای سبک گفتار به موتور TTS گوگل فرستاده می‌شود — همان «لحن» که خواسته بودید قابل تنظیم باشد.
+                  </p>
+                </div>
+
+                <Accordion type="single" collapsible className="w-full">
+                  <AccordionItem value="by-level" className="border-border/60">
+                    <AccordionTrigger className="text-xs py-2 hover:no-underline">
+                      <span className="flex items-center gap-1.5 text-right">
+                        <Layers className="h-3.5 w-3.5 text-primary" aria-hidden />
+                        صدای جداگانه برای هر دورهٔ تحصیلی (اختیاری — پیشنهادی: صدای شادتر برای ابتدایی)
+                      </span>
+                    </AccordionTrigger>
+                    <AccordionContent className="space-y-2.5">
+                      <p className="text-[11px] text-muted-foreground leading-5">
+                        اگر برای دوره‌ای صدای جایگزین یا لحن جدا انتخاب کنید، پادکست کتاب‌های همان دوره با آن ساخته می‌شود؛
+                        خالی گذاشتن یعنی همان پیش‌فرض بالا.
+                      </p>
+                      {EDUCATION_LEVELS.map((lvl) => {
+                        const voiceOverride = ttsVoiceByLevel[lvl.code] ?? "";
+                        const styleOverride = ttsStyleByLevel[lvl.code] ?? "";
+                        const hasOverride = voiceOverride !== "" || styleOverride !== "";
+                        return (
+                          <div key={lvl.code} className="rounded-xl border border-border/70 bg-muted/20 p-3 space-y-2">
+                            <div className="flex items-center justify-between gap-2">
+                              <p className="text-xs font-bold flex items-center gap-1.5">
+                                <span aria-hidden>{lvl.emoji}</span>
+                                {lvl.label}
+                                {hasOverride && (
+                                  <Badge variant="secondary" className="text-[9px]">تنظیم اختصاصی</Badge>
+                                )}
+                              </p>
+                              {hasOverride && (
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  className="h-7 text-[10px] text-rose-600 hover:bg-rose-500/10"
+                                  onClick={() => {
+                                    setTtsVoiceByLevel((p) => {
+                                      const n = { ...p };
+                                      delete n[lvl.code];
+                                      return n;
+                                    });
+                                    setTtsStyleByLevel((p) => {
+                                      const n = { ...p };
+                                      delete n[lvl.code];
+                                      return n;
+                                    });
+                                  }}
+                                >
+                                  <X className="h-3 w-3 ml-1" aria-hidden />
+                                  حذف تنظیم اختصاصی
+                                </Button>
+                              )}
+                            </div>
+                            <div className="grid gap-2 sm:grid-cols-2">
+                              <Select
+                                value={voiceOverride}
+                                onValueChange={(v) =>
+                                  setTtsVoiceByLevel((p) => ({ ...p, [lvl.code]: v }))
+                                }
+                              >
+                                <SelectTrigger className="h-9 text-xs" aria-label={`صدای دورهٔ ${lvl.label}`}>
+                                  <SelectValue placeholder="همان صدای پیش‌فرض" />
+                                </SelectTrigger>
+                                <SelectContent className="max-h-64">
+                                  {(settings.geminiTts?.voices ?? []).map((v) => (
+                                    <SelectItem key={v.code} value={v.code}>
+                                      <span className="text-xs">{v.label}</span>
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                              <Input
+                                value={styleOverride}
+                                onChange={(e) =>
+                                  setTtsStyleByLevel((p) => ({ ...p, [lvl.code]: e.target.value }))
+                                }
+                                placeholder="لحن اختصاصی همین دوره (اختیاری)…"
+                                className="h-9 text-xs"
+                              />
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </AccordionContent>
+                  </AccordionItem>
+                </Accordion>
+
+                <p className="text-[11px] text-muted-foreground leading-4 flex items-start gap-1.5">
+                  <Info className="h-3.5 w-3.5 mt-0.5 shrink-0" aria-hidden />
+                  گفتار فارسی با موتور چندزبانهٔ گوگل ساخته می‌شود و فایل WAV در تلگرام ذخیره می‌گردد؛
+                  اگر موتور جمینای در دسترس نباشد، پادکست با موتور پیش‌فرض پلتفرم ساخته می‌شود تا هرگز پادکستی حذف نشود.
+                </p>
+
+                {ttsMsg && <InlineAlert msg={ttsMsg} />}
+              </CardContent>
+              <Separator />
+              <CardFooter className="py-3 flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <Button onClick={() => void saveTts()} disabled={savingTts || !ttsDirty}>
+                  {savingTts ? <Loader2 className="animate-spin" aria-hidden /> : <Save aria-hidden />}
+                  ذخیرهٔ گوینده
+                </Button>
+                <p className="text-[11px] text-muted-foreground leading-5">
+                  {settings.aiProvider !== "gemini"
+                    ? "برای اثرگذاری، ارائه‌دهندهٔ فعال باید جمینای باشد."
+                    : ttsDirty
+                      ? "تغییرات ذخیره‌نشده دارید."
+                      : "تنظیمات فعلی ذخیره شده است."}
+                </p>
+              </CardFooter>
+            </Card>
+          )}
 
           {/* ═══ کارت ۲ — اتصال ربات تلگرام ═══ */}
           <Card className="border-border/60">
