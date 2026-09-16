@@ -956,7 +956,9 @@ function deriveGrades(books: BookSummary[], level: string | null): string[] {
     if (levelOfBook(b) === level) set.add(gradeOfBook(b));
   }
   const canon = GRADE_ORDER[level ?? ""] ?? [];
-  const known = canon.filter((g) => set.has(g));
+  // راند ۳۰ — همهٔ پایه‌های رسمی دوره نمایش داده می‌شوند (مثل chap.sch.ir) حتی اگر
+  // هنوز کتابی برای آن پایه ثبت نشده باشد؛ شمارش هر دکمه خودش (۰) را نشان می‌دهد.
+  const known = canon;
   const unknown = [...set].filter((g) => !canon.includes(g) && g !== "").sort((a, b) => a.localeCompare(b, "fa"));
   const out = [...known, ...unknown];
   if (set.has("")) out.push("");
@@ -1038,7 +1040,11 @@ async function sendLibraryGrades(
   if (!r.ok) return void (await deliverScreen(chatId, opts, r.text, [[{ text: "🔄 تلاش دوباره", callback_data: `blvl:${levelCode === "" ? NO_LEVEL : levelCode}` }]]));
 
   const all = (r.data.books ?? []).filter((b) => levelOfBook(b) === levelCode);
-  if (all.length === 0) {
+  const canonical = GRADE_ORDER[levelCode] ?? [];
+  // راند ۳۰ — برای دوره‌های واقعی، حتی با ۰ کتاب، همهٔ پایه‌های رسمی نمایش داده
+  // می‌شوند (درخواست مدیر: «همهٔ پایه رو نمیاره»). فقط برای «بدون دوره» و پیش‌دبستانی
+  // (که پایه ندارد) پیام خالی می‌ماند.
+  if (all.length === 0 && (levelCode === "" || canonical.length === 0)) {
     const kb: InlineKeyboard = [[{ text: "🔙 بازگشت به دوره‌ها", callback_data: "books" }]];
     if (r.data.canUpload) kb.push([{ text: "➕ افزودن کتاب جدید (PDF)", callback_data: "upnew" }]);
     return void (await deliverScreen(
@@ -1063,10 +1069,11 @@ async function sendLibraryGrades(
   kb.push([{ text: "🔄 به‌روزرسانی", callback_data: `blvl:${levelCode === "" ? NO_LEVEL : levelCode}` }]);
   kb.push([{ text: "🔙 تغییر دوره", callback_data: "books" }]);
 
+  const emptyNote = all.length === 0 ? "\n\n🌱 هنوز کتابی در این دوره ثبت نشده — پایه‌ها را برای مرور می‌بینید." : "";
   await deliverScreen(
     chatId,
     opts,
-    `${emoji} <b>${esc(levelLabel)}</b> — ${faNum(all.length)} کتاب\n\n🎓 <b>گام ۲ از ۳ — پایهٔ تحصیلی</b> را انتخاب کنید 👇`,
+    `${emoji} <b>${esc(levelLabel)}</b> — ${faNum(all.length)} کتاب${emptyNote}\n\n🎓 <b>گام ۲ از ۳ — پایهٔ تحصیلی</b> را انتخاب کنید 👇 (پایه‌های بدون کتاب هم قابل انتخاب‌اند)`,
     kb
   );
 }

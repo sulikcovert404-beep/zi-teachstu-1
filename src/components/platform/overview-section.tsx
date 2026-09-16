@@ -7,7 +7,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { ErrorState, PageTitle, StatCard, faNum } from "@/components/shared/blocks";
 import {
   Building2, Users, School, Layers, FileCheck2, ClipboardList, FileText, Activity,
-  HeartPulse, Sparkles, AlertTriangle, CheckCircle2,
+  HeartPulse, Sparkles, AlertTriangle, CheckCircle2, FileDown,
 } from "lucide-react";
 import type { PlatformOverview } from "./types";
 
@@ -183,6 +183,38 @@ export function OverviewSection({ onGoAi }: { onGoAi: () => void }) {
               <p className="text-xs text-muted-foreground truncate">مشاهده وضعیت زنده دروازه هوش مصنوعی</p>
             </div>
           </button>
+        </CardContent>
+      </Card>
+
+      {/* راند ۳۰ — گزارش جامع پروژه (PDF قابل دانلود) */}
+      <Card className="border-border/60 bg-gradient-to-bl from-emerald-50/80 to-transparent dark:from-emerald-950/30">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base flex items-center gap-2">
+            <FileDown className="h-4.5 w-4.5 text-emerald-600 dark:text-emerald-400" aria-hidden />
+            گزارش جامع پروژه
+          </CardTitle>
+          <CardDescription>
+            سند کامل معرفی پروژه — معماری، امکانات، همگام‌سازی ساختار درسی با chap.sch.ir، نتایج تست‌های جامع و نقشهٔ راه — در قالب PDF.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-wrap items-center gap-3">
+          <a
+            href="/project-report.pdf"
+            download="پلتفرم-آموزش-هوشمند-ایران-گزارش.pdf"
+            className="inline-flex min-h-[44px] items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white transition-colors hover:bg-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2"
+          >
+            <FileDown className="h-4 w-4" aria-hidden />
+            دانلود گزارش (PDF)
+          </a>
+          <a
+            href="/report/project-report.html"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex min-h-[44px] items-center gap-2 rounded-lg border border-border bg-background px-4 py-2.5 text-sm font-bold transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+          >
+            مشاهده نسخهٔ HTML
+          </a>
+          <p className="w-full text-xs text-muted-foreground">تاریخ تهیه: شهریور ۱۴۰۵ — راند ۳۰ · حجم حدود ۲۰۰ کیلوبایت</p>
         </CardContent>
       </Card>
     </div>

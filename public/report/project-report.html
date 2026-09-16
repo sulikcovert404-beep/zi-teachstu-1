@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<title>گزارش جامع پروژه — پلتفرم آموزش هوشمند ایران</title>
+<style>
+  @font-face { font-family: 'Vazirmatn'; src: url('./fonts/Vazirmatn-Regular.woff2') format('woff2'); font-weight: 400; font-display: swap; }
+  @font-face { font-family: 'Vazirmatn'; src: url('./fonts/Vazirmatn-Medium.woff2') format('woff2'); font-weight: 500; font-display: swap; }
+  @font-face { font-family: 'Vazirmatn'; src: url('./fonts/Vazirmatn-Bold.woff2') format('woff2'); font-weight: 700; font-display: swap; }
+
+  @page { size: 720px 1020px; margin: 0; }
+
+  :root {
+    --bg: #f8fafc;
+    --ink: #0f172a;
+    --muted: #475569;
+    --accent: #059669;
+    --accent-dark: #064e3b;
+    --card: #ffffff;
+    --line: #e2e8f0;
+  }
+
+  html, body {
+    margin: 0; padding: 0; width: 720px;
+    background: #064e3b;
+    color: var(--ink);
+    font-family: 'Vazirmatn', 'Noto Sans SC', sans-serif;
+    line-break: strict; word-break: normal;
+  }
+  p, td, li, .content { overflow-wrap: break-word; word-break: break-word; }
+
+  @media screen {
+    html { height: auto; display: flex; justify-content: center; background: #064e3b; }
+    body { margin: 20px auto; box-shadow: 0 8px 40px rgba(0,0,0,.4); }
+  }
+
+  /* ─── جلد ─── */
+  .cover {
+    width: 720px; height: 1020px; box-sizing: border-box;
+    break-after: page; overflow: hidden; position: relative;
+    background: linear-gradient(160deg, #064e3b 0%, #022c22 58%, #01271d 100%);
+    color: #ecfdf5;
+    display: flex; flex-direction: column; justify-content: center;
+    padding: 64px;
+  }
+  .cover .deco-ring {
+    position: absolute; top: 48px; left: 48px; width: 220px; height: 220px;
+    border: 2px solid rgba(52, 211, 153, .22); border-radius: 50%;
+  }
+  .cover .deco-ring2 {
+    position: absolute; bottom: 150px; right: 52px; width: 170px; height: 170px;
+    border: 2px solid rgba(52, 211, 153, .16); border-radius: 50%;
+  }
+  .cover .deco-grid {
+    position: absolute; bottom: 190px; right: 96px; width: 110px; height: 110px; opacity: .16;
+    background-image: radial-gradient(rgba(236,253,245,.9) 1.5px, transparent 1.5px);
+    background-size: 20px 20px;
+  }
+  .cover .badge {
+    display: inline-block; width: fit-content;
+    color: #a7f3d0;
+    border-radius: 999px; padding: 8px 22px; font-size: 14px; letter-spacing: .3px;
+    margin-bottom: 30px; background: rgba(2, 44, 34, .8);
+  }
+  .cover h1 { margin: 0 0 6px 0; font-size: 46px; line-height: 1.35; font-weight: 700; }
+  .cover .sub { font-size: 21px; color: #d1fae5; margin: 10px 0 0 0; font-weight: 500; }
+  .cover .desc { font-size: 15.5px; color: #a7f3d0; line-height: 2; margin-top: 26px; max-width: 540px; }
+  .cover .meta-row { display: flex; gap: 14px; margin-top: 44px; flex-wrap: wrap; }
+  .cover .meta-chip {
+    background: rgba(2, 44, 34, .8);
+    border-radius: 12px; padding: 13px 19px; min-width: 130px;
+  }
+  .cover .meta-chip .k { font-size: 11.5px; color: #6ee7b7; margin-bottom: 4px; }
+  .cover .meta-chip .v { font-size: 15.5px; font-weight: 700; color: #ecfdf5; }
+  .cover .edition {
+    position: absolute; bottom: 56px; right: 64px; left: 64px;
+    display: flex; justify-content: space-between; align-items: center;
+    border-top: 2px solid rgba(110, 231, 183, .35); padding-top: 46px;
+    font-size: 12.5px; color: #6ee7b7;
+  }
+
+  /* ─── بدنه ─── */
+  .main-content { background: var(--bg); padding: 56px 60px 44px 60px; }
+
+  .chapter-header { break-after: avoid; break-inside: avoid; margin-top: 26px; }
+  .chapter-header:first-child { margin-top: 0; }
+  .section-tag {
+    display: inline-block; color: var(--accent); font-size: 12.5px; font-weight: 700;
+    letter-spacing: .4px; margin-bottom: 6px;
+  }
+  .section-title { font-size: 25px; font-weight: 700; color: var(--ink); margin: 0 0 10px 0; }
+  .divider { height: 3px; width: 64px; background: var(--accent); border-radius: 2px; margin-bottom: 18px; }
+
+  .body-text { font-size: 14.5px; line-height: 2.05; color: #1e293b; margin: 0 0 12px 0; text-align: justify; }
+  .body-text b { color: var(--ink); }
+
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+    padding: 18px 20px; margin-bottom: 14px; break-inside: avoid;
+  }
+  .card .card-title { font-size: 15.5px; font-weight: 700; color: var(--accent-dark); margin-bottom: 8px; }
+  .card .card-text { font-size: 13.5px; line-height: 1.95; color: var(--muted); }
+
+  .feature-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px; }
+  .feature {
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+    padding: 15px 16px; break-inside: avoid;
+  }
+  .feature .f-icon {
+    width: 34px; height: 34px; border-radius: 10px; background: #ecfdf5;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 17px; margin-bottom: 9px; border: 1px solid #a7f3d0;
+  }
+  .feature .f-title { font-size: 14px; font-weight: 700; margin-bottom: 5px; color: var(--ink); }
+  .feature .f-text { font-size: 12.5px; line-height: 1.85; color: var(--muted); }
+
+  table.tbl { width: 100%; border-collapse: collapse; background: var(--card); border-radius: 12px; overflow: hidden; margin: 4px 0 14px 0; }
+  table.tbl th {
+    background: var(--accent-dark); color: #ecfdf5; font-size: 12.5px; font-weight: 700;
+    padding: 9px 12px; text-align: right;
+  }
+  table.tbl td {
+    font-size: 12.5px; color: #334155; padding: 8px 12px;
+    border-bottom: 1px solid var(--line); vertical-align: top; line-height: 1.8;
+  }
+  table.tbl tr:last-child td { border-bottom: none; }
+  table.tbl tr:nth-child(even) td { background: #f0fdf4; }
+  td.num, th.num { text-align: center; width: 52px; }
+  .ltr { direction: ltr; unicode-bidi: embed; display: inline-block; font-size: .92em; }
+
+  .callout {
+    background: #ecfdf5; border: 1px solid #a7f3d0; border-right: 4px solid var(--accent);
+    border-radius: 12px; padding: 14px 18px; margin-bottom: 14px; break-inside: avoid;
+  }
+  .callout .co-title { font-weight: 700; font-size: 14px; color: var(--accent-dark); margin-bottom: 5px; }
+  .callout .co-text { font-size: 13px; line-height: 1.95; color: #065f46; }
+
+  .stat-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 14px; }
+  .stat {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 14px 10px; text-align: center; break-inside: avoid;
+  }
+  .stat .s-num { font-size: 24px; font-weight: 700; color: var(--accent); }
+  .stat .s-label { font-size: 11.5px; color: var(--muted); margin-top: 4px; line-height: 1.6; }
+
+  .round-item {
+    display: flex; gap: 12px; background: var(--card); border: 1px solid var(--line);
+    border-radius: 12px; padding: 12px 14px; margin-bottom: 10px; break-inside: avoid;
+  }
+  .round-item .r-badge {
+    min-width: 46px; height: 46px; border-radius: 12px; background: var(--accent-dark);
+    color: #ecfdf5; display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 15px;
+  }
+  .round-item .r-title { font-size: 13.5px; font-weight: 700; color: var(--ink); margin-bottom: 3px; }
+  .round-item .r-text { font-size: 12.5px; line-height: 1.8; color: var(--muted); }
+
+  /* ─── صفحهٔ پایانی ─── */
+  .ending {
+    width: 720px; height: 1020px; box-sizing: border-box;
+    break-before: page; overflow: hidden; position: relative;
+    background: linear-gradient(200deg, #064e3b 0%, #022c22 60%, #01271d 100%);
+    color: #ecfdf5; display: flex; flex-direction: column; justify-content: center;
+    padding: 70px;
+  }
+  .ending .deco-ring { position: absolute; top: 60px; right: 60px; width: 200px; height: 200px; border: 2px solid rgba(52,211,153,.2); border-radius: 50%; }
+  .ending h2 { font-size: 34px; font-weight: 700; margin: 0 0 18px 0; }
+  .ending p { font-size: 15.5px; line-height: 2.2; color: #a7f3d0; margin: 0 0 14px 0; max-width: 540px; }
+  .ending .sig { margin-top: 40px; border-top: 2px solid rgba(110,231,183,.35); padding-top: 46px; font-size: 13px; color: #6ee7b7; }
+</style>
+</head>
+<body>
+
+<!-- ═══════════ جلد ═══════════ -->
+<div class="cover">
+  <div class="deco-ring"></div>
+  <div class="deco-ring2"></div>
+  <div class="deco-grid"></div>
+  <div class="badge">گزارش جامع پروژه · نسخهٔ کامل</div>
+  <h1>پلتفرم آموزش هوشمند ایران</h1>
+  <div class="sub">سامانهٔ چند-مدرسه‌ای آموزش با هوش مصنوعی — از کتاب درسی تا پادکست</div>
+  <div class="desc">
+    این گزارش، تصویر کاملی از پروژهٔ «پلتفرم آموزش هوشمند ایران» ارائه می‌دهد: معماری فنی،
+    امکانات کلیدی، معماری درس‌محور کتاب‌ها، همگام‌سازی ساختار درسی با پایگاه رسمی chap.sch.ir،
+    روند ۳۰ راندِ توسعه، نتایج تست‌های جامع و نقشهٔ راه پیش رو.
+  </div>
+  <div class="meta-row">
+    <div class="meta-chip"><div class="k">وضعیت</div><div class="v">فعال و پایدار</div></div>
+    <div class="meta-chip"><div class="k">تاریخ گزارش</div><div class="v">شهریور ۱۴۰۵</div></div>
+    <div class="meta-chip"><div class="k">راند توسعه</div><div class="v">۳۰</div></div>
+    <div class="meta-chip"><div class="k">زبان</div><div class="v">فارسی · RTL</div></div>
+  </div>
+  <div class="edition">
+    <span>نسخهٔ ۱٫۰ — تهیه‌شده برای مدیر پلتفرم</span>
+    <span>teachstu · AI Education Platform</span>
+  </div>
+</div>
+
+<!-- ═══════════ بدنه ═══════════ -->
+<div class="main-content">
+
+  <!-- ۱: معرفی -->
+  <div class="chapter-header">
+    <div class="section-tag">بخش ۱</div>
+    <div class="section-title">معرفی پروژه</div>
+    <div class="divider"></div>
+  </div>
+  <p class="body-text">
+    «پلتفرم آموزش هوشمند ایران» یک سامانهٔ ابری چند-مدرسه‌ای (Multi-Tenant) است که کتاب‌های درسی را
+    به اکوسیستم هوشمند تبدیل می‌کند: معلم یا مدیر یک PDF کتاب را بارگذاری می‌کند و پلتفرم به‌صورت
+    خودکار ساختار درسی کتاب را تشخیص می‌دهد، و برای هر درس، <b>خلاصه، جزوه، شکل‌های آموزشی،
+    نمونه‌سؤال و پادکست صوتی</b> می‌سازد. دانش‌آموزان از طریق وب، مینی‌اپ تلگرام یا بات تلگرام با
+    محتوا کار می‌کنند، آزمون می‌دهند و امتیاز جمع می‌کنند.
+  </p>
+  <p class="body-text">
+    طراحی پلتفرم کاملاً فارسی و راست‌به‌چپ (RTL) است و ساختار درسی آن — از پیش‌دبستانی تا هنرستان —
+    با نظام رسمی آموزش ایران و پایگاه ملی کتاب‌های درسی (chap.sch.ir) هماهنگ شده است. جداسازی کامل
+    دادهٔ مدارس (Tenant Isolation)، کنترل دسترسی چهار سطحی و ثبت ممیزی همهٔ عملیات حساس، از الزامات
+    اولیهٔ طراحی بوده است.
+  </p>
+  <div class="stat-row">
+    <div class="stat"><div class="s-num">۵</div><div class="s-label">دورهٔ تحصیلی از پیش‌دبستانی تا هنرستان</div></div>
+    <div class="stat"><div class="s-num">۱۸</div><div class="s-label">پایهٔ تحصیلی با فهرست رسمی دروس</div></div>
+    <div class="stat"><div class="s-num">۴</div><div class="s-label">نقش کاربری با پنل اختصاصی</div></div>
+    <div class="stat"><div class="s-num">۳۰</div><div class="s-label">راند توسعهٔ مستمر تا امروز</div></div>
+  </div>
+
+  <!-- ۲: معماری -->
+  <div class="chapter-header">
+    <div class="section-tag">بخش ۲</div>
+    <div class="section-title">معماری فنی</div>
+    <div class="divider"></div>
+  </div>
+  <p class="body-text">
+    پلتفرم با رویکرد <b>API-First</b> ساخته شده: تمام قابلیت‌ها ابتدا به‌صورت REST API
+    (<span class="ltr">/api/v1/*</span>) پیاده‌سازی شده‌اند و رابط وب، مینی‌اپ و بات تلگرام هر سه
+    از همان API تغذیه می‌کنند. این تصمیم باعث شده افزودن کانال جدید (مثل بله یا ایتا در آینده)
+    به‌جای بازنویسی، فقط به ساخت یک آداپتور جدید نیاز داشته باشد.
+  </p>
+  <table class="tbl">
+    <tr><th>لایه</th><th>فناوری</th><th>توضیح</th></tr>
+    <tr><td><b>فریم‌ورک</b></td><td><span class="ltr">Next.js 16 (App Router) + TypeScript</span></td><td>رندر سمت سرور، مسیرهای API و رابط RTL</td></tr>
+    <tr><td><b>پایگاه داده</b></td><td><span class="ltr">Prisma ORM + SQLite</span></td><td>اسکیمای نوع‌ایمن؛ جداسازی مدارس در لایهٔ سرویس</td></tr>
+    <tr><td><b>هوش مصنوعی</b></td><td>دروازهٔ چند-ارائه‌دهنده (zai + Gemini)</td><td>خلاصه/جزوه/سؤال/شکل/پادکست + TTS گویندهٔ Gemini 2.5</td></tr>
+    <tr><td><b>تلگرام</b></td><td>mini-service مستقل (پورت ۳۰۰۳)</td><td>بات long-polling + منوی مرحله‌ای + ذخیره‌سازی فایل در تلگرام</td></tr>
+    <tr><td><b>احراز هویت</b></td><td>توکن اپک + کوکی HttpOnly</td><td>نشست‌های هش‌شده در DB + اتصال حساب تلگرام</td></tr>
+    <tr><td><b>زیرساخت</b></td><td><span class="ltr">bun + Caddy gateway</span></td><td>اجرای سریع، انتشار امن روی یک پورت</td></tr>
+  </table>
+  <div class="callout">
+    <div class="co-title">دروازهٔ هوش مصنوعی چند-ارائه‌دهنده</div>
+    <div class="co-text">
+      اگر ارائه‌دهنده‌ای قطع یا محدود شود (مثلاً محدودیت جغرافیایی گوگل)، سیستم به‌صورت خودکار به
+      ارائه‌دهندهٔ پشتیبان سوییچ می‌کند و پادکست‌ها هیچ‌وقت به‌خاطر خطای TTS از دست نمی‌روند.
+      عبور از محدودیت جغرافیایی گوگل از طریق پروکسی شخصی مدیر (هلند) و با احراز هویت رمزدار
+      پشتیبانی می‌شود.
+    </div>
+  </div>
+
+  <!-- ۳: نقش‌ها -->
+  <div class="chapter-header">
+    <div class="section-tag">بخش ۳</div>
+    <div class="section-title">نقش‌ها و حساب‌های نمونه</div>
+    <div class="divider"></div>
+  </div>
+  <table class="tbl">
+    <tr><th>نقش</th><th>حساب نمونه</th><th>دسترسی‌های کلیدی</th></tr>
+    <tr><td><b>مدیر کل پلتفرم</b></td><td><span class="ltr">owner@platform.ir</span></td><td>مدارس، کاربران، تنظیمات AI و TTS، تأیید کتاب‌ها، پروکسی جمینای</td></tr>
+    <tr><td><b>مدیر مدرسه</b></td><td><span class="ltr">admin@school.ir</span></td><td>مدیریت معلمان و دانش‌آموزان مدرسه، کلاس‌ها، کتاب‌ها</td></tr>
+    <tr><td><b>معلم</b></td><td><span class="ltr">teacher@school.ir</span></td><td>آپلود کتاب (با مجوز)، تکلیف، آزمون، تحلیل کلاس</td></tr>
+    <tr><td><b>دانش‌آموز</b></td><td><span class="ltr">student@school.ir</span></td><td>کتاب‌خانه، خلاصه/جزوه/پادکست، آزمون، امتیاز، دستیار هوشمند</td></tr>
+  </table>
+  <p class="body-text">
+    رمز عبور همهٔ حساب‌های نمونه <b>۱۲۳۴۵۶</b> است و روی صفحهٔ ورود، کارت‌های ورود سریع برای هر چهار
+    نقش وجود دارد. داده‌های نمونه (یک مدرسه، ۹ کاربر، ۴ کتاب) به‌صورت خودکار در صورت خالی‌بودن
+    پایگاه داده بازسازی می‌شوند (Self-Healing).
+  </p>
+
+  <!-- ۴: امکانات -->
+  <div class="chapter-header">
+    <div class="section-tag">بخش ۴</div>
+    <div class="section-title">امکانات کلیدی</div>
+    <div class="divider"></div>
+  </div>
+  <div class="feature-grid">
+    <div class="feature"><div class="f-icon">📚</div><div class="f-title">کتاب‌خانهٔ هوشمند</div><div class="f-text">مرور آبشاری دوره ← پایه ← درس مطابق chap.sch.ir، جست‌وجو، وضعیت زندهٔ تولید محتوا برای هر درس.</div></div>
+    <div class="feature"><div class="f-icon">🧠</div><div class="f-title">تولید محتوای AI</div><div class="f-text">خلاصه، جزوه، شکل‌های SVG آموزشی، نمونه‌سؤال چهارمدله و پادکست — همه ذخیره و قابل بازتولید.</div></div>
+    <div class="feature"><div class="f-icon">🎧</div><div class="f-title">پادکست با Gemini TTS</div><div class="f-text">۳۰ صدای رسمی قابل انتخاب توسط مدیر + لحن پیش‌فرض و تنظیم اختصاصی هر دورهٔ تحصیلی.</div></div>
+    <div class="feature"><div class="f-icon">✍️</div><div class="f-title">آزمون هوشمند</div><div class="f-text">چهارگزینهای/درست-غلط/جای‌خالی/تشریحی، تصحیح خودکار، رکورد شخصی و امتیاز ضدتکرار.</div></div>
+    <div class="feature"><div class="f-icon">🤖</div><div class="f-title">بات تلگرام کامل</div><div class="f-text">کتاب‌خانه، خلاصه/جزوه/آزمون PDF، پادکست، ویزارد آپلود ۴ مرحله‌ای و اتصال حساب.</div></div>
+    <div class="feature"><div class="f-icon">📱</div><div class="f-title">مینی‌اپ تلگرام</div><div class="f-text">نسخهٔ وب داخل تلگرام با همання داده و نشست — بدون نصب چیزی.</div></div>
+    <div class="feature"><div class="f-icon">🏆</div><div class="f-title">سیستم امتیاز</div><div class="f-text">امتیاز برای آزمون و فعالیت با تاریخچهٔ ۳۰ روزه و انگیزه‌سازی دانش‌آموز.</div></div>
+    <div class="feature"><div class="f-icon">☁️</div><div class="f-title">ذخیره‌سازی در تلگرام</div><div class="f-text">فایل‌های PDF و صوتی یک‌بار در تلگرام ذخیره می‌شوند و ارسال بعدی فوری است.</div></div>
+  </div>
+
+  <!-- ۵: معماری درس‌محور -->
+  <div class="chapter-header">
+    <div class="section-tag">بخش ۵</div>
+    <div class="section-title">معماری درس‌محور کتاب‌ها (خواستهٔ کلیدی مدیر)</div>
+    <div class="divider"></div>
+  </div>
+  <p class="body-text">
+    بر اساس معماری طراحی‌شده، <b>آپلود کتاب فقط یک کار هوشمند انجام می‌دهد</b>: تشخیص ساختار — اینکه
+    کتاب چند «درس»، «فصل»، «پودمان»، «مهارت» یا «واحد» دارد و عنوان هر کدام چیست. سپس تولید محتوا
+    <b>تنبل (Lazy)</b> است: اولین کاربری که درسی را انتخاب کند، تولید خلاصه/جزوه/شکل/آزمون/پادکستِ همان
+    درس را با Gemini آغاز می‌کند و نتیجه ذخیره می‌شود؛ بقیهٔ کاربران همان درس را به‌صورت فوری
+    (میلی‌ثانیه‌ای) از خروجی ذخیره‌شده دریافت می‌کنند. اگر دو نفر همزمان یک درس را انتخاب کنند،
+    سازوکار Claim اتمیک تضمین می‌کند فقط یک تولید اجرا شود.
+  </p>
+  <div class="callout">
+    <div class="co-title">پرامپت‌های سن‌سنجیده (Age-Adaptive)</div>
+    <div class="co-text">
+      همهٔ پرامپت‌های تولید محتوا بر اساس دورهٔ تحصیلی کتاب تغییر می‌کنند: برای ابتدایی محتوای کودکانه
+      با جمله‌های کوتاه و مثال‌های ملموس، برای متوسطهٔ اول لحن نوجوانانه، برای متوسطهٔ دوم محتوای
+      کنکورمحور با نکته‌ها و هشدارهای رایج آزمون. تعداد سؤالات و طول خروجی نیز بر اساس سن تنظیم می‌شود.
+    </div>
+  </div>
+
+  <!-- ۶: chap.sch.ir -->
+  <div class="chapter-header">
+    <div class="section-tag">بخش ۶</div>
+    <div class="section-title">همگام‌سازی کامل با پایگاه رسمی chap.sch.ir</div>
+    <div class="divider"></div>
+  </div>
+  <p class="body-text">
+    ساختار درسی پلتفرم (۱۸ پایه در ۵ دوره) از فهرست رسمی کتاب‌های درسی ویرایش ۱۴۰۵-۱۴۰۶ استخراج و
+    بازبینی شد. ۱۶ صفحهٔ دسته‌بندی پایگاه ملی (ابتدایی اول تا ششم، متوسطهٔ اول هفتم تا نهم، متوسطهٔ
+    دوم با هر سه رشتهٔ ریاضی-فیزیک/علوم تجربی/علوم انسانی) تجزیه شدند و نام‌ها دقیقاً با عنوان رسمی
+    کتاب‌ها هماهنگ شد:
+  </p>
+  <table class="tbl">
+    <tr><th>دوره</th><th>پایه‌ها</th><th>تعداد دروس رسمی هر پایه</th><th>نمونهٔ اصلاحات مهم</th></tr>
+    <tr><td><b>ابتدایی</b></td><td>اول تا ششم</td><td>۶ تا ۱۲ درس</td><td>«هدیه‌های آسمان» از پایهٔ دوم؛ «نگارش فارسی»؛ «تفکر و پژوهش» و «کار و فناوری» فقط ششم</td></tr>
+    <tr><td><b>متوسطهٔ اول</b></td><td>هفتم تا نهم</td><td>۱۳ درس</td><td>افزوده‌شدن «تفکر و سبک زندگی» به هر سه پایه</td></tr>
+    <tr><td><b>متوسطهٔ دوم</b></td><td>دهم تا دوازدهم</td><td>۲۲ تا ۲۴ درس</td><td>نام‌های جدید: ریاضی ۱، آزمایشگاه علوم تجربی، حسابان ۱/۲، هویت اجتماعی</td></tr>
+    <tr><td><b>هنرستان</b></td><td>دهم تا دوازدهم</td><td>۱۹ درس</td><td>دروس مشترک + رشته‌های فنی‌حرفه‌ای</td></tr>
+    <tr><td><b>پیش‌دبستانی</b></td><td>—</td><td>۷ حوزهٔ یادگیری</td><td>بازی و یادگیری، قصه و کتاب، مهارت‌های زندگی و…</td></tr>
+  </table>
+  <p class="body-text">
+    این ساختار از یک منبع واحد (<span class="ltr">curriculum.ts</span>) از طریق API عمومی
+    <span class="ltr">/api/v1/public/meta</span> در اختیار وب، مینی‌اپ و بات قرار می‌گیرد و ویزارد
+    آپلود، فیلترهای کتاب‌خانه و اعتبارسنجی سرور همگی از همان منبع تغذیه می‌شوند.
+  </p>
+
+  <!-- ۷: راندها -->
+  <div class="chapter-header">
+    <div class="section-tag">بخش ۷</div>
+    <div class="section-title">خلاصهٔ مسیر توسعه (۳۰ راند)</div>
+    <div class="divider"></div>
+  </div>
+  <div class="round-item"><div class="r-badge">۱-۵</div><div><div class="r-title">پایه‌گذاری</div><div class="r-text">احراز هویت چهار نقشه، چند-مدرسه‌ای، API-First، پنل‌های نقش‌ها، طراحی RTL و سیستم طراحی.</div></div></div>
+  <div class="round-item"><div class="r-badge">۶-۱۰</div><div><div class="r-title">اکوسیستم آموزشی</div><div class="r-text">کتاب‌خانه هوشمند، استخراج متن PDF، اولین تولید محتوای AI، آزمون‌ساز، سیستم امتیاز.</div></div></div>
+  <div class="round-item"><div class="r-badge">۱۱-۱۵</div><div><div class="r-title">هوشمندسازی عمیق</div><div class="r-text">دستیار آموزشی گفت‌وگویی، شکل‌های آموزشی SVG، خروجی PDF/Word فارسی، اشتراک و پلن‌ها.</div></div></div>
+  <div class="round-item"><div class="r-badge">۱۶-۲۰</div><div><div class="r-title">کتاب درسی ملی</div><div class="r-text">ساختار رسمی دوره/پایه/درس، PDF اصلی کتاب برای دانلود، آپلود از تلگرام، کارت کتاب.</div></div></div>
+  <div class="round-item"><div class="r-badge">۲۱-۲۵</div><div><div class="r-title">بات تلگرام و پایداری</div><div class="r-text">بات کامل با long-polling مقاوم، ذخیره‌سازی فایل در تلگرام، دروازهٔ Gemini با فهرست مدل زنده، خودترمیمی داده.</div></div></div>
+  <div class="round-item"><div class="r-badge">۲۶-۲۸</div><div><div class="r-title">منوی مرحله‌ای و درس‌محوری</div><div class="r-text">آبشار دوره←پایه←درس در بات، عبور از محدودیت جغرافیایی با پروکسی مدیر، معماری درس‌محور + TTS قابل تنظیم + پرامپت‌های سن‌سنجیده.</div></div></div>
+  <div class="round-item"><div class="r-badge">۲۹</div><div><div class="r-title">رفع باگ ویزارد آپلود بات</div><div class="r-text">ریشه‌یابی کامل: بات فیلد اشتباه متا را می‌خواند؛ نرمال‌سازی هر دو شکل داده + کش نسخه‌دار.</div></div></div>
+  <div class="round-item"><div class="r-badge">۳۰</div><div><div class="r-title">بازیابی فاجعه + همگام‌سازی رسمی + تست جامع</div><div class="r-text">بازیابی کامل از rollback زیرساختی، سرویس‌های ماندگار (double-fork)، همگام‌سازی chap.sch.ir، seed کتاب‌ها و همین گزارش.</div></div></div>
+
+  <!-- ۸: رخداد راند ۳۰ -->
+  <div class="chapter-header">
+    <div class="section-tag">بخش ۸</div>
+    <div class="section-title">رخداد مهم: بازیابی از بازگردانی زیرساخت</div>
+    <div class="divider"></div>
+  </div>
+  <p class="body-text">
+    در ابتدای راند ۳۰، زیرساخت سندباکس به‌صورت غیرمنتظره به یک تصویر قدیمی (راند ۲۵) بازگردانی شد؛
+    کد، تاریخچهٔ گیت و پایگاه داده به عقب برگشت و بات تلگرام در وضعیت زامبی (نظرسنجیِ مرده) قرار
+    گرفت — همان چیزی که به‌صورت «هیچ دکمه‌ای کار نمی‌کند» گزارش شد. روند بازیابی:
+  </p>
+  <div class="card">
+    <div class="card-title">۱) بازیابی کد از گیت‌هاب</div>
+    <div class="card-text">همهٔ کامیت‌های راندهای ۲۶ تا ۲۹ از مخزن امن گیت‌هاب بازگردانی شد (قانون «پوش بعد از هر کار» نجات‌بخش بود).</div>
+  </div>
+  <div class="card">
+    <div class="card-title">۲) سرویس‌های ماندگار</div>
+    <div class="card-text">کشف شد که سندباکس پروسه‌های پس‌زمینهٔ هر فراخوانی را می‌کشد؛ راه‌حل: دیمون‌ساز double-fork که والدمِ سرویس‌ها را init می‌کند — سرور اصلی و بات حالا بین فراخوانی‌ها زنده می‌مانند.</div>
+  </div>
+  <div class="card">
+    <div class="card-title">۳) محافظت در برابر تکرار</div>
+    <div class="card-text">آرشیو همگام‌سازی بوت (/home/sync/repo.tar) با وضعیت فعلی شامل پایگاه داده به‌روز شد + پشتیبان DB در پوشهٔ امن upload؛ ری‌استارت‌های آینده دیگر فاجعه نمی‌سازند.</div>
+  </div>
+
+  <!-- ۹: نتایج تست -->
+  <div class="chapter-header">
+    <div class="section-tag">بخش ۹</div>
+    <div class="section-title">نتایج تست جامع (راند ۳۰)</div>
+    <div class="divider"></div>
+  </div>
+  <table class="tbl">
+    <tr><th>حوزهٔ تست</th><th>سنجه</th><th>نتیجه</th></tr>
+    <tr><td>احراز هویت</td><td>ورود هر ۴ نقش</td><td>✓ همه موفق (۲۰۰)</td></tr>
+    <tr><td>کتاب‌خانه</td><td>فهرست کتاب‌ها برای دانش‌آموز</td><td>✓ ۴ کتاب (۱ درس‌محور + ۳ کامل)</td></tr>
+    <tr><td>معماری درس‌محور</td><td>فهرست درس‌ها + انتخاب درس ۲ + محتوای کودکانه</td><td>✓ ۳ درس با عناوین و محتوای سن‌سنجیده</td></tr>
+    <tr><td>آزمون</td><td>دریافت و ثبت آزمون درس و کتاب</td><td>✓ ثبت موفق با امتیازدهی</td></tr>
+    <tr><td>متای درسی</td><td>فهرست رسمی پایه‌ها و دروس (۵ دوره)</td><td>✓ مطابق chap.sch.ir (هفتم = ۱۳ درس)</td></tr>
+    <tr><td>تنظیمات</td><td>پنل مدیر + بلوک TTS + توکن بات</td><td>✓ فعال؛ بات نظرسنجی می‌کند</td></tr>
+    <tr><td>رابط وب</td><td>ورود دانش‌آموز ← کتاب‌خانه ← کتاب درس‌محور ← درس</td><td>✓ رندر کامل؛ کنسول بدون خطا</td></tr>
+    <tr><td>واکنش‌گرایی</td><td>عرض موبایل ۳۹۰px + فوتر چسبان</td><td>✓ بدون سرریز افقی؛ فوتر صحیح</td></tr>
+    <tr><td>بات تلگرام</td><td>مصرف آپدیت‌های معلق + سلامت سرویس</td><td>✓ صف معلق صفر شد؛ نظرسنجی فعال</td></tr>
+  </table>
+
+  <!-- ۱۰: آینده -->
+  <div class="chapter-header">
+    <div class="section-tag">بخش ۱۰</div>
+    <div class="section-title">نقشهٔ راه پیشنهادی</div>
+    <div class="divider"></div>
+  </div>
+  <div class="card">
+    <div class="card-title">اولویت بالا</div>
+    <div class="card-text">ارتقای بات تلگرام به نمای درس‌محور (مطابق وب) · خروجی PDF/Word برای تک‌تک درس‌ها · پایدارسازی پروکسی سرور هلند (tinyproxy).</div>
+  </div>
+  <div class="card">
+    <div class="card-title">اولویت متوسط</div>
+    <div class="card-text">ثبت‌نام با شمارهٔ موبایل و تأیید مدیر · فونت فارسی در PDFهای کتاب · گزارش تحلیل یادگیری برای والدین · نقش والدین.</div>
+  </div>
+  <div class="card">
+    <div class="card-title">افق بلندمدت</div>
+    <div class="card-text">اپ اندروید · کانال‌های پیام‌رسان ایرانی (بله/ایتا) با همان API · بازار محتوای معلمان · حالت آفلاین با هم‌گام‌سازی.</div>
+  </div>
+
+  <!-- ۱۱: شروع سریع -->
+  <div class="chapter-header">
+    <div class="section-tag">بخش ۱۱</div>
+    <div class="section-title">راهنمای شروع سریع</div>
+    <div class="divider"></div>
+  </div>
+  <p class="body-text">
+    پلتفرم از پنل پیش‌نمایش در دسترس است. با یکی از حساب‌های نمونه (رمز ۱۲۳۴۵۶) وارد شوید؛ برای
+    تجربهٔ کامل معماری درس‌محور، کتاب «علوم تجربی سوم ابتدایی» را باز کنید و یکی از سه درس آن را
+    انتخاب کنید. برای آپلود کتاب جدید، در بات تلگرام فایل PDF بفرستید یا از وب گزینهٔ افزودن کتاب را
+    بزنید؛ ساختار درسی کتاب به‌صورت خودکار تشخیص داده می‌شود.
+  </p>
+  <table class="tbl">
+    <tr><th>کار</th><th>مسیر</th></tr>
+    <tr><td>ورود به پلتفرم</td><td>صفحهٔ اصلی ← کارت‌های ورود سریع</td></tr>
+    <tr><td>کتاب درس‌محور نمونه</td><td>کتاب‌خانه ← علوم تجربی سوم ابتدایی ← انتخاب درس</td></tr>
+    <tr><td>تنظیم صدا و لحن پادکست</td><td>پنل مدیر ← تنظیمات ← گویندهٔ پادکست (Gemini TTS)</td></tr>
+    <tr><td>بات تلگرام</td><td>جست‌وجوی بات در تلگرام ← دستور /start</td></tr>
+    <tr><td>آپلود کتاب</td><td>بات: ارسال PDF یا /upload — وب: دکمهٔ افزودن کتاب</td></tr>
+  </table>
+
+  <div class="chapter-header">
+    <div class="section-tag">بخش ۱۲</div>
+    <div class="section-title">چک‌لیست تست پیشنهادی برای مدیر</div>
+    <div class="divider"></div>
+  </div>
+  <p class="body-text">
+    برای اطمینان از سلامت پلتفرم پس از استقرار، این سنجه‌ها به‌صورت دوره‌ای (مثلاً هفتگی) قابل
+    اجرا هستند و هر مورد کمتر از یک دقیقه زمان می‌برد:
+  </p>
+  <div class="card">
+    <div class="card-title">✓ سلامت سرویس‌ها</div>
+    <div class="card-text">بازکردن صفحهٔ ورود (سرور وب) و فرستادن /start به بات (سرویس تلگرام). اگر دکمه‌های بات پاسخ دادند، حلقهٔ نظرسنجی زنده است.</div>
+  </div>
+  <div class="card">
+    <div class="card-title">✓ زنجیرهٔ تولید محتوا</div>
+    <div class="card-text">آپلود یک PDF نمونه؛ تأیید اینکه فقط «تعداد درس‌ها» تشخیص داده می‌شود و با انتخاب اولین درس، تولید آغاز و ذخیره می‌شود؛ انتخاب دوم همان درس باید فوری باشد.</div>
+  </div>
+  <div class="card">
+    <div class="card-title">✓ آزمون و امتیاز</div>
+    <div class="card-text">دادن یک آزمون چهارگزینهای به‌عنوان دانش‌آموز و بررسی ثبت رکورد و امتیاز در بخش «پیشرفت». تکرار آزمون نباید امتیاز تکراری بدهد.</div>
+  </div>
+  <div class="card">
+    <div class="card-title">✓ تنظیمات AI</div>
+    <div class="card-text">از پنل مدیر، «آزمودن اتصال» ارائه‌دهندهٔ هوش مصنوعی و بررسی پیام فارسی نتیجه؛ اگر از پروکسی جمینای استفاده می‌کنید، سلامت سرور هلند هم باید سبز باشد.</div>
+  </div>
+  <div class="card">
+    <div class="card-title">✓ پشتیبان‌گیری</div>
+    <div class="card-text">پس از هر تغییر مهم، آرشیو همگام‌سازی بوت به‌روز می‌شود؛ با این حال یک نسخهٔ پشتیبان دستی از پایگاه داده در پوشهٔ امن نگه داشته می‌شود و مخزن گیت‌هاب مرجع نهایی کد است.</div>
+  </div>
+  <p class="body-text">
+    در صورت بروز هر ناهماهنگی، سابقهٔ کامل رخدادها و راه‌حل‌ها در سند داخلی
+    <span class="ltr">worklog.md</span> پروژه ثبت شده و مسیر بازیابی گام‌به‌گام در همین گزارش (بخش ۸)
+    توضیح داده شده است.
+  </p>
+
+</div>
+
+<!-- ═══════════ صفحهٔ پایانی ═══════════ -->
+<div class="ending">
+  <div class="deco-ring"></div>
+  <h2>آمادهٔ کلاس درسِ فردا</h2>
+  <p>
+    پلتفرم آموزش هوشمند ایران از یک ایده تا یک اکوسیستم کامل آموزشی — با تولید محتوای درس‌محورِ
+    سن‌سنجیده، بات تلگرام، آزمون هوشمند و پادکست — رسیده و همهٔ روزها روی بستر پایدار و نسخه‌گیری‌شده
+    در گیت‌هاب نگهداری می‌شود.
+  </p>
+  <p>
+    این گزارش به‌صورت خودکار از وضعیت زندهٔ پروژه تهیه شده است؛ آخرین تست‌های جامع در همان روز انتشار
+    آن اجرا شده‌اند.
+  </p>
+  <div class="sig">
+    پلتفرم آموزش هوشمند ایران · گزارش نسخهٔ ۱٫۰ · شهریور ۱۴۰۵
+  </div>
+</div>
+
+</body>
+</html>
